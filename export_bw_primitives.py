@@ -8,37 +8,54 @@ from mathutils import Vector, Matrix, Euler
 
 # --- Smart Name and Path Resolver ---
 def get_universal_config(obj, export_path, export_info):
-    # Get original filename from export_info (passed from __init__.py)
     original_filename = export_info.get("original_filename", "")
     
     lower_name = obj.name.lower()
+    parent = obj.parent
+    
+    has_turret_joint = False
+    has_chassis_v = False
+    
+    if parent:
+        sibling_names = [c.name for c in parent.children]
+        has_turret_joint = any("HP_turretJoint" in s for s in sibling_names)
+        has_chassis_v = any(s == "V" for s in sibling_names)
     if "gun" in lower_name:
         forced_filename, part_suffix = "Gun_01", "guns" 
     elif "turret" in lower_name:
         forced_filename, part_suffix = "Turret_01", "turret_01"
-    elif "hull" in lower_name:
+        
+    elif "hull" in lower_name or has_turret_joint:
         forced_filename, part_suffix = "Hull", "hull"
-    elif "chassis" in lower_name:
+    elif "chassis" in lower_name or has_chassis_v:
         forced_filename, part_suffix = "Chassis", "chassis"
+        
     else:
         forced_filename = obj.name.split('.')[0]
         part_suffix = forced_filename.lower()
 
-    # Use original filename if it exists in custom properties
     if original_filename:
         forced_filename = original_filename
 
     normalized_path = export_path.replace('\\', '/')
-    tank_base_path = "vehicles/american/A191_Ares_90_C" 
+    tank_base_path = "vehicles/american/A191_Ares_90_C" # Fallback
     tank_pure_name = "Ares_90_C" 
 
     if 'vehicles/' in normalized_path:
         try:
-            parts = normalized_path.split('vehicles/')[-1] 
-            path_segments = parts.split('/')
-            if len(path_segments) >= 2:
-                nation, tank_folder = path_segments[0], path_segments[1]
-                tank_base_path = f"vehicles/{nation}/{tank_folder}"
+            rel_path = normalized_path.split('vehicles/')[-1]
+            segments = rel_path.split('/')
+            
+            path_acc = ["vehicles"]
+            for seg in segments:
+                if (seg.lower().startswith("lod") and any(c.isdigit() for c in seg)) or "." in seg:
+                    break
+                path_acc.append(seg)
+            
+            tank_base_path = "/".join(path_acc)
+            
+            if len(segments) >= 2:
+                tank_folder = segments[1]
                 tank_pure_name = tank_folder.split('_', 1)[1] if '_' in tank_folder else tank_folder
         except: pass 
 
