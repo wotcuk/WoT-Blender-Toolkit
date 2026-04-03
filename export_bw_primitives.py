@@ -425,8 +425,15 @@ class BigWorldModelExporter:
                             prop = doc.createElement('property'); prop.appendChild(doc.createTextNode(key[7:])); me.appendChild(prop)
                             prop.appendChild(doc.createElement('Texture')).appendChild(doc.createTextNode(str(bmat[key])))
                         elif key.startswith("bw_bool_"):
-                            prop = doc.createElement('property'); prop.appendChild(doc.createTextNode(key[8:])); me.appendChild(prop)
-                            prop.appendChild(doc.createElement('Bool')).appendChild(doc.createTextNode(str(bmat[key])))
+                            prop_name = key[8:]
+                            prop = doc.createElement('property'); prop.appendChild(doc.createTextNode(prop_name)); me.appendChild(prop)
+                            
+                            # Eğer gelen özellik alphaTestEnable ise, Blender'ı görmezden gel ve zorla false yap
+                            if prop_name == "alphaTestEnable":
+                                prop.appendChild(doc.createElement('Bool')).appendChild(doc.createTextNode("false"))
+                            else:
+                                # Değerin XML standartlarına uygun olması için str(bmat[key]).lower() kullanmak daha güvenlidir
+                                prop.appendChild(doc.createElement('Bool')).appendChild(doc.createTextNode(str(bmat[key]).lower()))
                         elif key.startswith("bw_int_"):
                             prop = doc.createElement('property'); prop.appendChild(doc.createTextNode(key[7:])); me.appendChild(prop)
                             prop.appendChild(doc.createElement('Int')).appendChild(doc.createTextNode(str(bmat[key])))

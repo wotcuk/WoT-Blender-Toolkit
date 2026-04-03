@@ -10,7 +10,9 @@ __pycache__/
 *.blend4
 *.blend@
 
-
+# Obsidian
+.obsidian/
+.trash/
 
 *.dll
 
