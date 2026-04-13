@@ -1,4 +1,4 @@
-"""SkepticalFox 2015-2024 - Tam Kapsamlı Debug Sürümü"""
+"""Uses Old import method. Will be fixed in the future"""
 
 # imports
 import logging
@@ -21,7 +21,7 @@ from .loaddatamesh import LoadDataMesh
 logger = logging.getLogger(__name__)
 
 def write_to_blender_text(content, clear=False):
-    """Blender içindeki Text Editor'e (BW_Import_Debug_Log) mesaj yazar."""
+    """Writes messages to Blender's Text Editor (BW_Import_Debug_Log)."""
     text_name = "BW_Import_Debug_Log"
     txt = bpy.data.texts.get(text_name) or bpy.data.texts.new(text_name)
     if clear:
@@ -36,23 +36,21 @@ def get_empty_by_nodes(col: bpy.types.Collection, elem: ET.Element, empty_obj=No
 
     identifier = elem.findtext("identifier").strip()
     
-    # 1. BigWorld XML verilerini oku
+    # 1. Read BigWorld XML data
     r0 = utils_AsVector(elem.findtext("transform/row0"))
     r1 = utils_AsVector(elem.findtext("transform/row1"))
     r2 = utils_AsVector(elem.findtext("transform/row2"))
     r3 = utils_AsVector(elem.findtext("transform/row3"))
 
-    # 2. Blender Matrisini olustur
-    # KRITIK: BigWorld satirlarini Blender'in SUTUNLARINA (Column) esliyoruz.
-    # Bu islem koordinatlarin kaybolmasini engeller.
+    # 2. Create Blender Matrix
+    # CRITICAL: Map BigWorld rows to Blender columns to preserve coordinates
     mtx = Matrix()
-    mtx.col[0] = [*r0, 0] # Lokal X Ekseni (Rotasyon + Scale)
-    mtx.col[1] = [*r1, 0] # Lokal Y Ekseni
-    mtx.col[2] = [*r2, 0] # Lokal Z Ekseni
-    mtx.col[3] = [*r3, 1] # KOORDINATLAR (Translation) - Burasi artik 0 degil!
+    mtx.col[0] = [*r0, 0] # Local X Axis (Rotation + Scale)
+    mtx.col[1] = [*r1, 0] # Local Y Axis
+    mtx.col[2] = [*r2, 0] # Local Z Axis
+    mtx.col[3] = [*r3, 1] # Translation (Coordinates)
 
-    # 3. Koordinat Sistemi Donusumu (BW Y-up -> Blender Z-up)
-    # Senin orijinal .xzy (X->X, Y->Z, Z->Y) mantigini tum matrise uyguluyoruz.
+    # 3. Coordinate System Conversion (BW Y-up -> Blender Z-up)
     C = Matrix([
         [1, 0, 0, 0],
         [0, 0, 1, 0],
@@ -60,44 +58,40 @@ def get_empty_by_nodes(col: bpy.types.Collection, elem: ET.Element, empty_obj=No
         [0, 0, 0, 1]
     ])
     
-    # Matris donusumu: Hem aciyi hem yeri ayni anda dondurur
+    # Matrix conversion: Rotates both angle and location simultaneously
     final_mtx = C @ mtx @ C
 
-    # 4. Obje olustur ve hiyerarsiyi kur
+    # 4. Create object and establish hierarchy
     ob = bpy.data.objects.new(identifier, None)
     col.objects.link(ob)
     
     if empty_obj is not None:
-        ob.parent = empty_obj # Once ebeveyne bagla
+        ob.parent = empty_obj
         
-    # 5. Matrisi lokal transform (matrix_basis) olarak ata
-    # Artik hem koordinat hem de menteşe egimi (rotation) Blender'da gorunur olacak.
+    # 5. Assign matrix as local transform (matrix_basis)
     ob.matrix_basis = final_mtx
 
-    # Alt nodelara devam et
+    # Process child nodes
     for node in elem.iterfind("node"):
         get_empty_by_nodes(col, node, ob)
 
     return ob
 
-# YENI EKLENEN FONKSIYON: Texture Bulucu
+# --- NEW: Texture Finder ---
 def find_and_assign_texture(mat, prop_name, base_path, is_data=False):
-    # XML'den gelen ham degeri al (Örn: "diffuseMapparticles/../wood_am.dds" gibi bozuk veya duzgun)
+    # Get raw path from XML
     raw_path = mat.get(f"BigWorld_{prop_name}")
     if not raw_path:
         return
 
-    # Dosya adini temizle ve al
-    # Windows/Linux slash farkini duzelt
+    # Clean and extract filename
     clean_path = raw_path.replace("\\", "/").strip("/")
     filename = os.path.basename(clean_path)
 
-    # 1. Strateji: Ayni klasorde ara (Dosya adiyla)
+    # Strategy 1: Search in the same folder by filename
     search_path_local = base_path / filename
     
-    # 2. Strateji: Tam klasor yapisinda ara (Goreceli yol)
-    # Eger raw_path "vehicles/..." gibi basliyorsa base_path'in ustlerine bakmak gerekir.
-    # Ancak burada basitlestirilmis olarak: base_path + clean_path deniyoruz.
+    # Strategy 2: Search full relative path
     search_path_full = base_path / clean_path
 
     final_image_path = None
@@ -108,7 +102,7 @@ def find_and_assign_texture(mat, prop_name, base_path, is_data=False):
         final_image_path = str(search_path_full)
     
     if final_image_path:
-        # Texture'i Blender'a yukle
+        # Load texture into Blender
         try:
             img_name = os.path.basename(final_image_path)
             if img_name in bpy.data.images:
@@ -119,19 +113,19 @@ def find_and_assign_texture(mat, prop_name, base_path, is_data=False):
             if is_data:
                 image.colorspace_settings.name = 'Non-Color'
 
-            # Node Kurulumu
+            # Node Setup
             mat.use_nodes = True
             nodes = mat.node_tree.nodes
             links = mat.node_tree.links
             
-            # Principled BSDF'i bul veya yarat
+            # Find or create Principled BSDF
             bsdf = None
             for n in nodes:
                 if n.type == 'BSDF_PRINCIPLED':
                     bsdf = n
                     break
             if not bsdf:
-                nodes.clear() # Temizle
+                nodes.clear()
                 bsdf = nodes.new('ShaderNodeBsdfPrincipled')
                 out = nodes.new('ShaderNodeOutputMaterial')
                 links.new(bsdf.outputs['BSDF'], out.inputs['Surface'])
@@ -153,21 +147,21 @@ def find_and_assign_texture(mat, prop_name, base_path, is_data=False):
                 links.new(norm_node.outputs['Normal'], bsdf.inputs['Normal'])
 
         except Exception as e:
-            logger.error(f"Texture yuklenirken hata: {e}")
-            raise Exception(f"Texture dosyasi bozuk veya acilamiyor: {final_image_path}")
+            logger.error(f"Error loading texture: {e}")
+            raise Exception(f"Corrupted or unreadable texture file: {final_image_path}")
     else:
-        # Texture bulunamadiysa HATA FIRLAT
-        err_msg = f"Texture Bulunamadi!\nAranan 1: {search_path_local}\nAranan 2: {search_path_full}"
+        # Throw error if texture is not found
+        err_msg = f"Texture Not Found!\nSearched 1: {search_path_local}\nSearched 2: {search_path_full}"
         logger.error(err_msg)
         raise Exception(err_msg)
 
 def fake_visual_from_primitives(primitives_filepath: Path):
-    write_to_blender_text("DEBUG: .visual dosyası yok, primitives içinden gruplar taklit ediliyor...")
+    write_to_blender_text("DEBUG: .visual file missing, faking groups from primitives...")
     root = ET.Element("root")
     dataMesh = LoadDataMesh(primitives_filepath)
     for name in dataMesh.packed_groups:
         if name.endswith("vertices"):
-            write_to_blender_text(f"DEBUG: Grup bulundu: {name}")
+            write_to_blender_text(f"DEBUG: Group found: {name}")
             renderSet_node = ET.SubElement(root, "renderSet")
             ET.SubElement(renderSet_node, "treatAsWorldSpaceObject").text = "false"
             geometry_node = ET.SubElement(renderSet_node, "geometry")
@@ -179,8 +173,8 @@ def fake_visual_from_primitives(primitives_filepath: Path):
     return root
 
 def load_bw_primitive_from_file(col: bpy.types.Collection, model_filepath: Path, import_empty: bool = False):
-    write_to_blender_text("=== BIGWORLD IMPORT BASLADI ===", clear=True)
-    write_to_blender_text(f"Dosya: {model_filepath}")
+    write_to_blender_text("=== BIGWORLD IMPORT STARTED ===", clear=True)
+    write_to_blender_text(f"File: {model_filepath}")
     
     try:
         visual_filepath = model_filepath.with_suffix(".visual_processed")
@@ -194,39 +188,39 @@ def load_bw_primitive_from_file(col: bpy.types.Collection, model_filepath: Path,
             primitives_filepath = primitives_filepath_old
 
         if not primitives_filepath.is_file():
-            write_to_blender_text(f"HATA: Primitives dosyası bulunamadı: {primitives_filepath}")
+            write_to_blender_text(f"ERROR: Primitives file not found: {primitives_filepath}")
             raise Exception("There is no primitives file in the directory!")
 
         has_visual = visual_filepath.is_file()
         if not has_visual:
             import_empty = False
-            write_to_blender_text("UYARI: .visual dosyası yok, sadece geometri yüklenecek.")
+            write_to_blender_text("WARNING: .visual file missing, loading geometry only.")
 
         if has_visual:
-            write_to_blender_text(f"DEBUG: Visual XML okunuyor: {visual_filepath}")
+            write_to_blender_text(f"DEBUG: Reading Visual XML: {visual_filepath}")
             with visual_filepath.open("rb") as f:
                 visual = XmlUnpacker().read(f)
         else:
             visual = fake_visual_from_primitives(primitives_filepath)
 
         if visual.find("renderSet") is None:
-            write_to_blender_text("HATA: XML içinde 'renderSet' bulunamadı.")
+            write_to_blender_text("ERROR: 'renderSet' not found in XML.")
             return
 
         root_empty_ob = None
         for rs_idx, renderSet in enumerate(visual.findall("renderSet")):
             vres_name = renderSet.findtext("geometry/vertices").strip()
             pres_name = renderSet.findtext("geometry/primitive").strip()
-            write_to_blender_text(f"DEBUG: RenderSet {rs_idx} işleniyor (V: {vres_name}, I: {pres_name})")
+            write_to_blender_text(f"DEBUG: Processing RenderSet {rs_idx} (V: {vres_name}, I: {pres_name})")
             
             mesh_name = os.path.splitext(vres_name)[0]
             bmesh = bpy.data.meshes.new(mesh_name)
 
-            # --- YENİ EKLENEN: Dinamik Stream (Veri Akışı) Tarayıcı ---
+            # --- NEW: Dynamic Stream Scanner ---
             uv2_name = ""
             colour_name = ""
             
-            # Tüm <stream> etiketlerini bul ve ne olduklarını anla
+            # Find all <stream> tags and identify them
             for stream_node in renderSet.findall("geometry/stream"):
                 stream_res_name = stream_node.text.strip()
                 if "uv2" in stream_res_name:
@@ -234,14 +228,12 @@ def load_bw_primitive_from_file(col: bpy.types.Collection, model_filepath: Path,
                 elif "colour" in stream_res_name:
                     colour_name = stream_res_name
 
-            # LoadDataMesh ÇAĞRISI (Artık colour beklentisini de iletiyoruz)
-            write_to_blender_text(f"DEBUG: LoadDataMesh veriyi çekiyor... (Beklenenler -> UV2: {bool(uv2_name)}, Colour: {bool(colour_name)})")
+            write_to_blender_text(f"DEBUG: LoadDataMesh pulling data... (Expected -> UV2: {bool(uv2_name)}, Colour: {bool(colour_name)})")
             dataMesh = LoadDataMesh(primitives_filepath, vres_name, pres_name, uv2_name, colour_name)
-            # -----------------------------------------------------------
-            write_to_blender_text(f"   Sonuç: {len(dataMesh.vertices)} vertex, {len(dataMesh.indices)} yüzey bulundu.")
+            write_to_blender_text(f"   Result: {len(dataMesh.vertices)} vertices, {len(dataMesh.indices)} faces found.")
 
             if len(dataMesh.vertices) == 0:
-                write_to_blender_text("KRITIK HATA: Vertex sayısı 0! Primitives dosyası bozuk veya export hatası var.")
+                write_to_blender_text("CRITICAL ERROR: Vertex count is 0! Primitives file is corrupted or export failed.")
                 continue
 
             bmesh.vertices.add(len(dataMesh.vertices))
@@ -256,19 +248,19 @@ def load_bw_primitive_from_file(col: bpy.types.Collection, model_filepath: Path,
             bmesh.loops.foreach_set("vertex_index", unpack_list(dataMesh.indices))
             bmesh.polygons.foreach_set("use_smooth", [True] * nbr_faces)
 
-            # UV İşlemleri
+            # UV Operations
             uv2_layer = None
             if uv2_name:
                 if dataMesh.uv2_list:
                     uv2_layer = bmesh.uv_layers.new(name="uv2")
-                    write_to_blender_text("DEBUG: uv2 katmanı eklendi.")
+                    write_to_blender_text("DEBUG: Added uv2 layer.")
                 else:
                     uv2_name = ""
 
             if dataMesh.uv_list:
                 uv_layer = bmesh.uv_layers.new(name="uv1")
                 uv_layer.active = True
-                write_to_blender_text("DEBUG: UV koordinatları eşleniyor...")
+                write_to_blender_text("DEBUG: Mapping UV coordinates...")
                 
                 uv_layer_data = uv_layer.data
                 uv2_layer_data = uv2_layer.data if uv2_layer else None
@@ -280,22 +272,21 @@ def load_bw_primitive_from_file(col: bpy.types.Collection, model_filepath: Path,
                         if uv2_name:
                             uv2_layer_data[li].uv = dataMesh.uv2_list[vi]
             else:
-                write_to_blender_text("UYARI: Modelde UV verisi bulunamadı.")
+                write_to_blender_text("WARNING: No UV data found in model.")
 
-            # --- YENİ EKLENEN: COLOR (Vertex Paint) İŞLEMLERİ ---
+            # --- NEW: COLOR (Vertex Paint) OPERATIONS ---
             if hasattr(dataMesh, "colour_list") and dataMesh.colour_list:
-                write_to_blender_text("DEBUG: BPVScolour (Vertex Color) bulundu, ekleniyor...")
-                # Blender 3.2+ uyumlu Vertex Color katmanı (Domain: POINT yani Vertex başına)
+                write_to_blender_text("DEBUG: BPVScolour (Vertex Color) found, adding...")
+                # Blender 3.2+ compatible Vertex Color layer
                 color_attr = bmesh.color_attributes.new(name="BPVScolour", type='BYTE_COLOR', domain='POINT')
                 for v_idx, c_bytes in enumerate(dataMesh.colour_list):
-                    # BigWorld RGBA baytlarını (0-255) Blender'ın 0.0-1.0 float aralığına çeviriyoruz
+                    # Convert BigWorld RGBA bytes to Blender floats
                     r, g, b, a = c_bytes[0]/255.0, c_bytes[1]/255.0, c_bytes[2]/255.0, c_bytes[3]/255.0
                     color_attr.data[v_idx].color = (r, g, b, a)
             else:
-                write_to_blender_text("DEBUG: BPVScolour verisi yok (Modelde renk geçişi yok).")
-            # -----------------------------------------------------
+                write_to_blender_text("DEBUG: No BPVScolour data found.")
 
-            # Materyal ve Grup İşlemleri
+            # Material and Group Operations
             primitiveGroupInfo = {}
             for primitiveGroup in renderSet.findall("geometry/primitiveGroup"):
                 primitiveGroupInfo[int(primitiveGroup.text)] = {
@@ -305,34 +296,33 @@ def load_bw_primitive_from_file(col: bpy.types.Collection, model_filepath: Path,
                     "groupOrigin": primitiveGroup.findtext("groupOrigin"),
                 }
 
-            write_to_blender_text(f"DEBUG: {len(dataMesh.PrimitiveGroups)} materyal grubu oluşturuluyor...")
+            write_to_blender_text(f"DEBUG: Creating {len(dataMesh.PrimitiveGroups)} material groups...")
             for i, pg in enumerate(dataMesh.PrimitiveGroups):
                 pgVisual = primitiveGroupInfo.get(i)
                 mat_name = pgVisual["identifier"] if pgVisual else f"mat_{i}"
                 material = bpy.data.materials.get(mat_name) or bpy.data.materials.new(mat_name)
                 bmesh.materials.append(material)
 
-                # --- YENİ EKLENEN: Otomatik Vertex Color Görselleştirme ---
+                # --- NEW: Automatic Vertex Color Visualization ---
                 if hasattr(dataMesh, "colour_list") and dataMesh.colour_list:
                     material.use_nodes = True
                     nodes = material.node_tree.nodes
                     links = material.node_tree.links
                     
-                    # Varsa Principled BSDF'i bul, yoksa yarat
+                    # Find or create Principled BSDF
                     bsdf = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
                     if not bsdf:
                         bsdf = nodes.new('ShaderNodeBsdfPrincipled')
                         bsdf.location = (0, 0)
                     
-                    # Attribute (BPVScolour) nodunu ekle
+                    # Add Attribute node for Vertex Color
                     attr_node = nodes.new('ShaderNodeAttribute')
                     attr_node.attribute_name = "BPVScolour"
                     attr_node.location = (-400, 200)
                     
                     links.new(attr_node.outputs['Alpha'], bsdf.inputs['Alpha'])
-                    material.blend_method = 'BLEND'   # Kumlanmayı bitirir, pürüzsüz geçiş sağlar
-                    material.show_transparent_back = True # Arkadaki poligonların görünmesini sağlar
-                # -----------------------------------------------------------
+                    material.blend_method = 'BLEND'
+                    material.show_transparent_back = True
 
                 startIndex = pg["startIndex"] // 3
                 count = pg["nPrimitives"]
@@ -340,15 +330,15 @@ def load_bw_primitive_from_file(col: bpy.types.Collection, model_filepath: Path,
                     if fidx < len(bmesh.polygons):
                         bmesh.polygons[fidx].material_index = i
 
-            write_to_blender_text("DEBUG: BMesh valide ediliyor...")
+            write_to_blender_text("DEBUG: Validating BMesh...")
             bmesh.validate(verbose=VERBOSE_VALIDATE)
             bmesh.update()
 
             ob = bpy.data.objects.new(mesh_name, bmesh)
 
-            # Kemik Ağırlıkları (Skinning)
+            # Bone Weights (Skinning)
             if "true" in renderSet.findtext("treatAsWorldSpaceObject").lower():
-                write_to_blender_text("DEBUG: Skinning (Kemik) verileri işleniyor...")
+                write_to_blender_text("DEBUG: Processing skinning data...")
                 if dataMesh.bones_info:
                     bone_nodes = renderSet.findall("node")
                     bone_arr = []
@@ -357,24 +347,21 @@ def load_bw_primitive_from_file(col: bpy.types.Collection, model_filepath: Path,
                         bone_arr.append({"name": bn, "group": ob.vertex_groups.new(name=bn)})
 
                     for vert_idx, iiiww in enumerate(dataMesh.bones_info):
-                        # Aynı kemik gelirse ağırlıkları toplayacak depo
+                        # Dictionary to accumulate weights for the same bone
                         weights_sum_map = {}
                         
-                        # --- YENI NESIL (8-BAYT) iiiww YAPISI ---
+                        # --- NEW GEN (8-BYTE) iiiww STRUCTURE ---
                         if len(iiiww) == 8: 
-                            # iiiww dizilimi: [0:i1] [1:i2] [2:i3] [3:p1] [4:p2] [5:w2] [6:w3] [7:w1]
-                            # Eşleşme: i1<->w1(B7), i2<->w2(B5), i3<->w3(B6)
                             mapping = [
-                                (iiiww[0], iiiww[7]), # i1 <-> w1
-                                (iiiww[1], iiiww[5]), # i2 <-> w2
-                                (iiiww[2], iiiww[6])  # i3 <-> w3
+                                (iiiww[0], iiiww[7]), 
+                                (iiiww[1], iiiww[5]), 
+                                (iiiww[2], iiiww[6])  
                             ]
                         
-                        # --- ESKI NESIL (5-BAYT) iiiww YAPISI ---
+                        # --- OLD GEN (5-BYTE) iiiww STRUCTURE ---
                         elif len(iiiww) == 5:
-                            # iiiww dizilimi: [0:i1] [1:i2] [2:i3] [3:w1] [4:w2]
                             w1, w2 = iiiww[3], iiiww[4]
-                            w3 = max(0, 255 - (w1 + w2)) # Kalan ağırlık i3'e
+                            w3 = max(0, 255 - (w1 + w2))
                             mapping = [
                                 (iiiww[0], w1),
                                 (iiiww[1], w2),
@@ -382,15 +369,16 @@ def load_bw_primitive_from_file(col: bpy.types.Collection, model_filepath: Path,
                             ]
                         else:
                             continue
-                        # Ağırlıkları topla ve kemik ID'lerini (idx//3) eşle
+                            
+                        # Accumulate weights and map bone IDs
                         for raw_idx, weight_val in mapping:
                             if weight_val > 0:
                                 bone_id = raw_idx // 3
                                 norm_weight = weight_val / 255.0
-                                # Kümülatif toplama: Aynı kemik geldiyse üstüne ekle
+                                # Cumulative addition
                                 weights_sum_map[bone_id] = weights_sum_map.get(bone_id, 0.0) + norm_weight
 
-                        # Blender Vertex Grubuna Uygula
+                        # Apply to Blender Vertex Group
                         for b_id, final_w in weights_sum_map.items():
                             if b_id < len(bone_arr) and final_w > 0.0001:
                                 bone_arr[b_id]["group"].add([vert_idx], final_w, "ADD")
@@ -403,11 +391,11 @@ def load_bw_primitive_from_file(col: bpy.types.Collection, model_filepath: Path,
                     root_empty_ob = get_empty_by_nodes(col, visual.findall("node")[0])
                 if root_empty_ob: ob.parent = root_empty_ob
 
-            write_to_blender_text(f"BASARILI: {mesh_name} sahneye eklendi.")
+            write_to_blender_text(f"SUCCESS: {mesh_name} added to scene.")
 
-        write_to_blender_text("=== IMPORT TAMAMLANDI ===")
+        write_to_blender_text("=== IMPORT COMPLETED ===")
 
     except Exception as e:
-        msg = f"\n!!! IMPORT HATASI !!!\n{str(e)}\n\n{traceback.format_exc()}"
+        msg = f"\n!!! IMPORT ERROR !!!\n{str(e)}\n\n{traceback.format_exc()}"
         write_to_blender_text(msg)
         print(msg)

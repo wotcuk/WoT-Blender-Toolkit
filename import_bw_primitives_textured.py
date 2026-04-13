@@ -67,23 +67,51 @@ def write_to_blender_text(content, clear=False):
     if clear: txt.clear()
     txt.write(str(content) + "\n")
 
-# --- 1. ORIGINAL HIERARCHY STRUCTURE ---
-def get_empty_by_nodes(col: bpy.types.Collection, elem: ET.Element, empty_obj=None):
-    if (elem.find("identifier") is None) or (elem.find("transform") is None): return None
+# --- 1. NEW ARMATURE HIERARCHY STRUCTURE ---
+def build_armature_bones(arm_obj, elem, parent_bone=None):
+    if (elem.find("identifier") is None) or (elem.find("transform") is None): return
+    
     identifier = elem.findtext("identifier").strip()
     r0 = utils_AsVector(elem.findtext("transform/row0"))
     r1 = utils_AsVector(elem.findtext("transform/row1"))
     r2 = utils_AsVector(elem.findtext("transform/row2"))
     r3 = utils_AsVector(elem.findtext("transform/row3"))
-    mtx = Matrix(); mtx.col[0] = [*r0, 0]; mtx.col[1] = [*r1, 0]; mtx.col[2] = [*r2, 0]; mtx.col[3] = [*r3, 1]
+    
+    mtx = Matrix()
+    mtx.col[0] = [*r0, 0]; mtx.col[1] = [*r1, 0]; mtx.col[2] = [*r2, 0]; mtx.col[3] = [*r3, 1]
+    
+
     C = Matrix([[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]])
     final_mtx = C @ mtx @ C
-    ob = bpy.data.objects.new(identifier, None)
-    col.objects.link(ob)
-    if empty_obj is not None: ob.parent = empty_obj
-    ob.matrix_basis = final_mtx
-    for node in elem.iterfind("node"): get_empty_by_nodes(col, node, ob)
-    return ob
+
+    bone = arm_obj.data.edit_bones.new(identifier)
+    bone.head = (0, 0, 0)
+    bone.tail = (0, 0.1, 0) 
+
+    if parent_bone:
+        bone.parent = parent_bone
+        bone.matrix = parent_bone.matrix @ final_mtx 
+    else:
+        bone.matrix = final_mtx
+
+    for child in elem.iterfind("node"):
+        build_armature_bones(arm_obj, child, bone)
+
+def create_armature_from_nodes(col, elem, armature_name):
+    arm_data = bpy.data.armatures.new(armature_name)
+    arm_data.display_type = 'WIRE'
+    arm_data.show_names = False
+    arm_obj = bpy.data.objects.new(armature_name, arm_data)
+    col.objects.link(arm_obj)
+    
+    bpy.context.view_layer.objects.active = arm_obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    
+    build_armature_bones(arm_obj, elem)
+    
+    bpy.ops.object.mode_set(mode='OBJECT')
+    arm_obj.hide_set(True)
+    return arm_obj
 
 
 # --- 2. TEXTURE AND NODE PROCESSING ---
@@ -460,8 +488,17 @@ def load_bw_primitive_textured(col: bpy.types.Collection, model_filepath: Path, 
                                 bone_arr[b_id]["group"].add([vert_idx], final_w, "ADD")
             
             if import_empty and visual.find("node") is not None:
-                if root_empty_ob is None: root_empty_ob = get_empty_by_nodes(col, visual.findall("node")[0])
-                if root_empty_ob: ob.parent = root_empty_ob
+                armature_name = model_filepath.stem
+                
+                if root_empty_ob is None: 
+                    root_empty_ob = create_armature_from_nodes(col, visual.findall("node")[0], armature_name)
+                
+                if root_empty_ob: 
+                    ob.parent = root_empty_ob
+                    mod = ob.modifiers.new(type='ARMATURE', name="Armature")
+                    mod.object = root_empty_ob
+
+        write_to_blender_text("[Success] Import completed successfully")
 
         write_to_blender_text("[Success] Import completed successfully")
         return {"FINISHED"}

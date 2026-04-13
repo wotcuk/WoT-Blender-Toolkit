@@ -40,10 +40,11 @@ try:
     from .import_bw_primitives import load_bw_primitive_from_file 
     from .import_bw_primitives_textured import load_bw_primitive_textured 
     from .loadctree import ctree_load
-#    from .import_bw_effects import import_bw_effect_pipeline 
-#    from .import_bw_vfx import load_vfx_pipeline
-#    from .export_bw_vfx import export_vfx_pipeline
+    from .import_bw_effects import import_bw_effect_pipeline 
+    from .import_bw_vfx import load_vfx_pipeline
+    from .export_bw_vfx import export_vfx_pipeline
     from .common.XmlUnpacker import XmlUnpacker
+    from .import_bw_animation import load_bw_animation
 
 except ImportError as e:
     print(f"[BigWorld Import] Module Import Error: {e}")
@@ -52,7 +53,19 @@ logging.basicConfig()
 logger = logging.getLogger(__name__)
 
 
-
+# --- AUTO NODE LOAD ---
+@persistent
+def auto_load_vfx_lib_handler(dummy):
+    addon_dir = os.path.dirname(__file__)
+    lib_path = os.path.join(addon_dir, "vfx_lib.blend")
+    if os.path.exists(lib_path):
+        try:
+            with bpy.data.libraries.load(lib_path, link=False) as (data_from, data_to):
+                groups_to_load = [ng for ng in data_from.node_groups if ng not in bpy.data.node_groups]
+                if groups_to_load:
+                    data_to.node_groups = groups_to_load
+        except Exception as e:
+            print(f"[VFX LOG] Auto-load error: {e}")
 
 
 # --- MENU FUNCTIONS ---
@@ -63,10 +76,13 @@ def menu_func_import(self, context):
     self.layout.operator(Import_From_ModelFile.bl_idname, text="BigWorld (.model)")
 
 def menu_func_import_eff(self, context):
-    self.layout.operator(Import_From_EffFile.bl_idname, text="BigWorld Effect (.eff / .effbin) [WIP]")
+    self.layout.operator(Import_From_EffFile.bl_idname, text="BigWorld Effect (.eff / .effbin)")
 
 def menu_func_import_vfx(self, context):
-    self.layout.operator(Import_From_VfxFile.bl_idname, text="BigWorld VFX (.vfx / .vfxbin) [WIP]")
+    self.layout.operator(Import_From_VfxFile.bl_idname, text="BigWorld VFX (.vfx / .vfxbin)")
+
+def menu_func_import_anim(self, context):
+    self.layout.operator(Import_From_AnimFile.bl_idname, text="BigWorld Animation (.anim_processed / .animation)")
 
 def menu_func_export(self, context):
     obj = context.active_object
@@ -77,7 +93,7 @@ def menu_func_export(self, context):
         self.layout.operator(Export_ModelFile.bl_idname, text="BigWorld (.model)")
 
 def menu_func_export_vfx(self, context):
-    self.layout.operator(Export_VfxFile.bl_idname, text="BigWorld VFX (.vfxxml / .vfxbin) [WIP]")
+    self.layout.operator(Export_VfxFile.bl_idname, text="BigWorld VFX (.vfxxml / .vfxbin)")
 
 
 # --- TANK DATABASE & ICONS ---
@@ -463,24 +479,23 @@ def extract_tank_files(game_path, tier, pkg_nation, tank_id, state, lod, skin, t
 
     return extracted, lod_prefix
 
-def find_hp_node(parent, name):
-    """Search for a specific Hardpoint name in object children."""
-    if not parent: return None
-    for child in parent.children:
-        if name in child.name: return child
-        found = find_hp_node(child, name)
-        if found: return found
+def get_bone_matrix_world(armature_obj, bone_name_substring):
+    """Armature içindeki kemikleri tarar ve dünya matrisini döndürür (V, HP_gunJoint vb. için)"""
+    if not armature_obj or armature_obj.type != 'ARMATURE': return None
+    for bone in armature_obj.pose.bones:
+        if bone_name_substring in bone.name:
+            return armature_obj.matrix_world @ bone.matrix
     return None
 
 def import_and_get_root(col, path):
-    """Import model and return the top-level EMPTY object."""
+    """Import model and return the top-level ARMATURE object."""
     if not path or not os.path.exists(path): return None
     old_objs = set(col.objects)
     load_bw_primitive_textured(col, Path(path), import_empty=True)
     new_objs = set(col.objects) - old_objs
     
     for obj in new_objs:
-        if obj.parent not in new_objs and obj.type == 'EMPTY': 
+        if obj.type == 'ARMATURE': 
             # Save original filename to custom properties
             obj["bw_export_filename"] = os.path.splitext(os.path.basename(path))[0]
             return obj
@@ -535,6 +550,19 @@ class Import_WoT_Dummy_Load(bpy.types.Operator):
             wm.progress_update(pct)
             context.workspace.status_text_set(f"WoT Import: {text} ({pct}%)")
             bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+
+        # --- NEW: Create Extra Parts Collection for duplicates ---
+        extra_col_name = "Extra_Parts"
+        extra_col = bpy.data.collections.get(extra_col_name)
+        if not extra_col:
+            extra_col = bpy.data.collections.new(extra_col_name)
+            context.scene.collection.children.link(extra_col)
+            
+        # Hide the collection itself instead of individual objects, 
+        # so the user can easily toggle it back on with a single click.
+        layer_col = context.view_layer.layer_collection.children.get(extra_col.name)
+        if layer_col:
+            layer_col.exclude = True
             
         update_ui_progress(10, "Loading Chassis...")
         chassis_obj = None
@@ -554,33 +582,48 @@ class Import_WoT_Dummy_Load(bpy.types.Operator):
                 h.parent = tank_master
                 if chassis_obj:
                     context.view_layer.update()
-                    target = find_hp_node(chassis_obj, "V")
-                    if target: h.matrix_world = target.matrix_world.copy()
+                    target_mtx = get_bone_matrix_world(chassis_obj, "V")
+                    if target_mtx: h.matrix_world = target_mtx.copy()
                 if not hull_obj: hull_obj = h
 
-        update_ui_progress(60, "Loading Turret...")
+        update_ui_progress(60, "Loading Turrets...")
         turret_objs = []
-        for f in get_files_by_prefix("Turret_"):
-            t = import_and_get_root(col, os.path.join(tank_path, f))
+        # Sort alphabetically to process 01 first, then 02, etc.
+        turret_files = sorted(get_files_by_prefix("Turret_"))
+        for idx, f in enumerate(turret_files):
+            is_primary = (idx == 0)
+            target_col = col if is_primary else extra_col
+            
+            t = import_and_get_root(target_col, os.path.join(tank_path, f))
             if t:
                 t["wot_part"] = "Turret"
-                t.parent = tank_master
+                
+                if is_primary:
+                    t.parent = tank_master
+                    turret_objs.append(t)
+                
                 if hull_obj:
                     context.view_layer.update()
-                    target = find_hp_node(hull_obj, "HP_turretJoint")
-                    if target: t.matrix_world = target.matrix_world.copy()
-                turret_objs.append(t)
+                    target_mtx = get_bone_matrix_world(hull_obj, "HP_turretJoint")
+                    if target_mtx: t.matrix_world = target_mtx.copy()
 
-        update_ui_progress(85, "Loading Gun...")
-        for f in get_files_by_prefix("Gun_"):
-            g = import_and_get_root(col, os.path.join(tank_path, f))
+        update_ui_progress(85, "Loading Guns...")
+        gun_files = sorted(get_files_by_prefix("Gun_"))
+        for idx, f in enumerate(gun_files):
+            is_primary = (idx == 0)
+            target_col = col if is_primary else extra_col
+            
+            g = import_and_get_root(target_col, os.path.join(tank_path, f))
             if g:
                 g["wot_part"] = "Gun"
-                g.parent = tank_master
+                
+                if is_primary:
+                    g.parent = tank_master
+                    
                 if turret_objs:
                     context.view_layer.update()
-                    target = find_hp_node(turret_objs[0], "HP_gunJoint")
-                    if target: g.matrix_world = target.matrix_world.copy()
+                    target_mtx = get_bone_matrix_world(turret_objs[0], "HP_gunJoint")
+                    if target_mtx: g.matrix_world = target_mtx.copy()
 
         update_ui_progress(100, "Finishing...")
         wm.progress_end()
@@ -594,6 +637,7 @@ class Import_WoT_Dummy_Load(bpy.types.Operator):
             shutil.rmtree(tex_temp, ignore_errors=True)
         except: pass
         return {'FINISHED'}
+
 
 
 # --- MATERIAL PANEL ---
@@ -641,10 +685,10 @@ class Import_From_EffFile(bpy.types.Operator, ImportHelper):
     bl_options = {"UNDO"}
     filename_ext = ".eff;.effbin"
     filter_glob: bpy.props.StringProperty(default="*.eff;*.effbin", options={"HIDDEN"})
-    
     def execute(self, context):
-        self.report({'WARNING'}, "Legacy Effect (.eff) Import is WIP / Not Working.")
-        return {"CANCELLED"}
+        try: import_bw_effect_pipeline(str(self.filepath))
+        except Exception as e: return {"CANCELLED"}
+        return {"FINISHED"}
 
 class Import_From_VfxFile(bpy.types.Operator, ImportHelper):
     bl_idname = "import_model.bw_vfx_new"
@@ -652,10 +696,28 @@ class Import_From_VfxFile(bpy.types.Operator, ImportHelper):
     bl_options = {"UNDO"}
     filename_ext = ".vfx;.vfxbin"
     filter_glob: bpy.props.StringProperty(default="*.vfx;*.vfxbin", options={"HIDDEN"})
+    def execute(self, context):
+        try: load_vfx_pipeline(str(self.filepath))
+        except Exception as e: return {"CANCELLED"}
+        return {"FINISHED"}
+
+class Import_From_AnimFile(bpy.types.Operator, ImportHelper):
+    bl_idname = "import_model.bwanim"
+    bl_label = "Import Animation"
+    bl_options = {"UNDO"}
+    filename_ext = ""
+    filter_glob: bpy.props.StringProperty(
+        default="*.anim*", 
+        options={"HIDDEN"}
+    )
     
     def execute(self, context):
-        self.report({'WARNING'}, "VFX Import is currently WIP / Not Working.")
-        return {"CANCELLED"}
+        try:
+            load_bw_animation(str(self.filepath))
+        except Exception as e:
+            self.report({'ERROR'}, f"Animasyon Import Hatasi: {e}")
+            return {"CANCELLED"}
+        return {"FINISHED"}
 
 class Import_From_ModelFile(bpy.types.Operator, ImportHelper):
     bl_idname = "import_model.bwmodel"
@@ -717,42 +779,48 @@ class Export_VfxFile(bpy.types.Operator, ExportHelper):
     bl_label = "Export VFX"
     filename_ext = ""
     filter_glob: bpy.props.StringProperty(default="*", options={"HIDDEN"})
-    
     def execute(self, context):
-        self.report({'WARNING'}, "VFX Export is currently WIP / Not Working.")
-        return {"CANCELLED"}
+        export_dir = os.path.dirname(self.filepath)
+        filename_base = os.path.splitext(os.path.basename(self.filepath))[0]
+        try: export_vfx_pipeline(export_dir, filename_base)
+        except Exception: return {"CANCELLED"}
+        return {"FINISHED"}
 
 
 # --- EXPORT HELPERS ---
-def get_nodes_by_empty(obj, export_info, is_root=True):
+def get_nodes_by_empty(obj, export_info, bone=None, is_root=True):
+    """
+    İsmine aldanma, kod kırılmasın diye aynı ismi bıraktık. 
+    Artık Empty objeleri değil, ARMATURE içindeki kemikleri tarıyor.
+    """
     from mathutils import Matrix
+    
     if is_root:
         node_name = "Scene Root"
-        # Lock Kök/Scene Root matrix to identity (0,0,0) for the engine
         matrix_to_write = [list(row) for row in Matrix()]
+        export_info[node_name] = {"matrix": matrix_to_write, "children": {}}
+        
+        if obj and obj.type == 'ARMATURE':
+            for root_bone in obj.data.bones:
+                if not root_bone.parent:
+                    get_nodes_by_empty(obj, export_info[node_name]["children"], root_bone, False)
+        
+        obj_models = [c for c in obj.children if c.type == 'MESH']
+        return obj_models
+        
     else:
-        node_name = os.path.splitext(obj.name)[0]
-        matrix_to_write = [list(row) for row in obj.matrix_local]
-    
-    export_info[node_name] = {
-        "loc": (0.0, 0.0, 0.0) if is_root else obj.location.xzy.to_tuple(),
-        "scale": (1.0, 1.0, 1.0) if is_root else obj.scale.xzy.to_tuple(),
-        "matrix": matrix_to_write, 
-        "children": {},
-    }
-    
-    obj_models = []
-    for child in obj.children:
-        if (child.data is None) and isinstance(child, bpy.types.Object):
-            get_nodes_by_empty(child, export_info[node_name]["children"], False)
-        elif isinstance(child.data, bpy.types.Mesh):
-            obj_models.append(child)
-    
-    flat_list = []
-    for item in obj_models:
-        if isinstance(item, list): flat_list.extend(item)
-        else: flat_list.append(item)
-    return flat_list
+        node_name = bone.name
+        
+        if bone.parent:
+            local_mat = bone.parent.matrix_local.inverted() @ bone.matrix_local
+        else:
+            local_mat = bone.matrix_local
+            
+        matrix_to_write = [list(row) for row in local_mat]
+        export_info[node_name] = {"matrix": matrix_to_write, "children": {}}
+        
+        for child_bone in bone.children:
+            get_nodes_by_empty(obj, export_info[node_name]["children"], child_bone, False)
 
 
 class Export_ModelFile(bpy.types.Operator, ExportHelper):
@@ -915,7 +983,7 @@ class Export_WoT_Tank_Quick(bpy.types.Operator):
         from .export_bw_primitives import BigWorldModelExporter
         exporter = BigWorldModelExporter()
         
-        valid_children = [c for c in target_tank.children if c.type == 'EMPTY' and "bw_export_filename" in c]
+        valid_children = [c for c in target_tank.children if c.type == 'ARMATURE' and "bw_export_filename" in c]
         total_parts = len(valid_children)
         
         wm = context.window_manager
@@ -975,6 +1043,7 @@ classes = (
     WOT_UL_TankList,
     VIEW3D_PT_wot_import_panel,  
     Import_WoT_Dummy_Load,
+    Import_From_AnimFile,
     Export_WoT_Tank_Quick
 )
 
@@ -986,11 +1055,13 @@ def register():
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_ctree)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_eff)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_vfx)
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_anim)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.types.NODE_MT_add.append(menu_func_add_wot_node)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_vfx)
     
-
+    if auto_load_vfx_lib_handler not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(auto_load_vfx_lib_handler)
     
     bpy.types.Material.BigWorld_Shader_Path = bpy.props.StringProperty(name="fx", default="shaders/std_effects/lightonly.fx")
 
@@ -1060,6 +1131,7 @@ def unregister():
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_ctree)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_eff)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_vfx)
+    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_anim)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_vfx)
     bpy.types.NODE_MT_add.remove(menu_func_add_wot_node)
@@ -1068,7 +1140,8 @@ def unregister():
         km.keymap_items.remove(kmi)
     addon_keymaps.clear()
     
-
+    if auto_load_vfx_lib_handler in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(auto_load_vfx_lib_handler)
         
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
