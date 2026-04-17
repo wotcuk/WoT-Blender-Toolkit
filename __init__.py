@@ -33,18 +33,20 @@ from mathutils import Vector, Matrix
 
 try:
     from .common.consts import visual_property_descr_dict
+    from .common.XmlUnpacker import XmlUnpacker
     from .export_bw_primitives import BigWorldModelExporter
     from .export_bw_primitives_processed import BigWorldModelExporterProcessed
     from .export_bw_primitives_skinned import BigWorldModelExporterSkinned
     from .export_bw_primitives_skinned_processed import BigWorldModelExporterSkinnedProcessed
+    from .export_bw_vfx import export_vfx_pipeline
     from .import_bw_primitives import load_bw_primitive_from_file 
     from .import_bw_primitives_textured import load_bw_primitive_textured 
-    from .loadctree import ctree_load
+    from .import_bw_sequence import load_bw_sequence
     from .import_bw_effects import import_bw_effect_pipeline 
     from .import_bw_vfx import load_vfx_pipeline
-    from .export_bw_vfx import export_vfx_pipeline
-    from .common.XmlUnpacker import XmlUnpacker
     from .import_bw_animation import load_bw_animation
+    from .loadctree import ctree_load
+    from .file_finder import WoTFileFinder
 
 except ImportError as e:
     print(f"[BigWorld Import] Module Import Error: {e}")
@@ -52,6 +54,8 @@ except ImportError as e:
 logging.basicConfig()
 logger = logging.getLogger(__name__)
 
+# --- GLOBAL FINDER ---
+_global_finder = WoTFileFinder()
 
 # --- AUTO NODE LOAD ---
 @persistent
@@ -86,16 +90,17 @@ def menu_func_import_anim(self, context):
 
 def menu_func_export(self, context):
     obj = context.active_object
-    if obj and obj.type == 'EMPTY' and "bw_export_base_path" in obj:
-        op = self.layout.operator(Export_WoT_Tank_Quick.bl_idname, text="BigWorld (.model)")
+    if obj and obj.type in {'EMPTY', 'ARMATURE'}:
+        op = self.layout.operator(Export_WoT_Tank_Quick.bl_idname, text="BigWorld Auto-Export")
         op.show_dialog = True 
-    else:
-        self.layout.operator(Export_ModelFile.bl_idname, text="BigWorld (.model)")
+        self.layout.operator(Export_ModelFile.bl_idname, text="BigWorld Manual Export (.model)")
 
 def menu_func_export_vfx(self, context):
     self.layout.operator(Export_VfxFile.bl_idname, text="BigWorld VFX (.vfxxml / .vfxbin)")
 
-
+def menu_func_import_seq(self, context):
+    icon_id = custom_icons["wot_icon"].icon_id if custom_icons and "wot_icon" in custom_icons else 0
+    self.layout.operator(Import_WoT_Sequence.bl_idname, text="BigWorld Sequence (.seq)", icon_value=icon_id)
 # --- TANK DATABASE & ICONS ---
 custom_icons = None
 tank_db = {}
@@ -479,27 +484,42 @@ def extract_tank_files(game_path, tier, pkg_nation, tank_id, state, lod, skin, t
 
     return extracted, lod_prefix
 
+
+# --- REFACTORED IMPORT LOGIC (USING FILEFINDER) ---
 def get_bone_matrix_world(armature_obj, bone_name_substring):
-    """Armature içindeki kemikleri tarar ve dünya matrisini döndürür (V, HP_gunJoint vb. için)"""
     if not armature_obj or armature_obj.type != 'ARMATURE': return None
     for bone in armature_obj.pose.bones:
-        if bone_name_substring in bone.name:
+        if bone_name_substring in bone.name: 
             return armature_obj.matrix_world @ bone.matrix
     return None
 
-def import_and_get_root(col, path):
-    """Import model and return the top-level ARMATURE object."""
-    if not path or not os.path.exists(path): return None
+def import_and_get_root(col, internal_path, finder, context):
+    """Lojistik Merkezi üzerinden modeli bulur ve yükler."""
+    found_path = finder.find(target_file=internal_path, base_dir="", internal_path=internal_path, context_pkg=context.get('last_pkg'))
+    if not found_path: return None
+    
     old_objs = set(col.objects)
-    load_bw_primitive_textured(col, Path(path), import_empty=True)
+    load_bw_primitive_textured(col, Path(found_path), import_empty=True, finder=finder, context=context)
     new_objs = set(col.objects) - old_objs
     
     for obj in new_objs:
         if obj.type == 'ARMATURE': 
-            # Save original filename to custom properties
-            obj["bw_export_filename"] = os.path.splitext(os.path.basename(path))[0]
+            obj.hide_set(False) 
+            obj["bw_export_filename"] = os.path.splitext(os.path.basename(found_path))[0]
+            if finder.last_found_pkg: context['last_pkg'] = finder.last_found_pkg
             return obj
     return None
+
+class Import_WoT_Sequence(bpy.types.Operator, ImportHelper):
+    bl_idname = "import_scene.wot_sequence"
+    bl_label = "Import BigWorld Sequence (.seq)"
+    bl_options = {'PRESET', 'UNDO'}
+    
+    filename_ext = ".seq"
+    filter_glob: bpy.props.StringProperty(default="*.seq", options={'HIDDEN'})
+    
+    def execute(self, context):
+        return load_bw_sequence(self.filepath)
 
 class Import_WoT_Dummy_Load(bpy.types.Operator):
     bl_idname = "import_model.dummy_load"
@@ -514,6 +534,9 @@ class Import_WoT_Dummy_Load(bpy.types.Operator):
             self.report({'WARNING'}, "Select a tank from the list!")
             return {'CANCELLED'}
 
+        finder = _global_finder
+        import_ctx = {'last_pkg': None}
+
         tank_id = scn.wot_tank_list[scn.wot_tank_list_index].tank_id
         pkg_nation = NATION_ICON_MAP.get(scn.wot_selected_nation, scn.wot_selected_nation)
         tier = scn.wot_selected_tier
@@ -521,14 +544,11 @@ class Import_WoT_Dummy_Load(bpy.types.Operator):
         skin = scn.wot_selected_skin if scn.wot_selected_skin else "default"
         lod = scn.wot_selected_lod
 
-        temp_dir = os.path.join(tempfile.gettempdir(), "WoT_Blender_Extracted")
-        success, prefix = extract_tank_files(prefs.wot_game_path, tier, pkg_nation, tank_id, state, lod, skin, temp_dir)
+        if skin == "default":
+            base_prefix = f"vehicles/{pkg_nation}/{tank_id}/{state}/{lod}/"
+        else:
+            base_prefix = f"vehicles/{pkg_nation}/{tank_id}/_skins/{skin}/{state}/{lod}/"
 
-        if not success:
-            self.report({'ERROR'}, "Files not found in PKG!")
-            return {'CANCELLED'}
-
-        tank_path = os.path.join(temp_dir, os.path.normpath(prefix))
         col = context.view_layer.active_layer_collection.collection
 
         tank_master = bpy.data.objects.new(tank_id, None)
@@ -538,11 +558,6 @@ class Import_WoT_Dummy_Load(bpy.types.Operator):
         else: base_export_path = f"vehicles/{pkg_nation}/{tank_id}/_skins/{skin}/{state}/"
         tank_master["bw_export_base_path"] = base_export_path
 
-        def get_files_by_prefix(prefix_name):
-            if not os.path.exists(tank_path): return []
-            return [f for f in os.listdir(tank_path) if f.startswith(prefix_name) and f.endswith(".model")]
-            
-        # Update UI progress to prevent Blender from freezing
         wm = context.window_manager
         wm.progress_begin(0, 100)
         
@@ -551,93 +566,87 @@ class Import_WoT_Dummy_Load(bpy.types.Operator):
             context.workspace.status_text_set(f"WoT Import: {text} ({pct}%)")
             bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
 
-        # --- NEW: Create Extra Parts Collection for duplicates ---
         extra_col_name = "Extra_Parts"
         extra_col = bpy.data.collections.get(extra_col_name)
         if not extra_col:
             extra_col = bpy.data.collections.new(extra_col_name)
             context.scene.collection.children.link(extra_col)
             
-        # Hide the collection itself instead of individual objects, 
-        # so the user can easily toggle it back on with a single click.
         layer_col = context.view_layer.layer_collection.children.get(extra_col.name)
         if layer_col:
-            layer_col.exclude = True
-            
+            layer_col.exclude = False
+
+        def get_available_parts(part_base_name):
+            names_to_try = [f"{part_base_name}.model"] + [f"{part_base_name}_{i:02d}.model" for i in range(1, 10)]
+            found_paths = []
+            for name in names_to_try:
+                internal_path = f"{base_prefix}{name}"
+                if finder.find(target_file=internal_path, base_dir="", internal_path=internal_path, context_pkg=import_ctx.get('last_pkg')):
+                    found_paths.append(internal_path)
+            return found_paths
+
         update_ui_progress(10, "Loading Chassis...")
         chassis_obj = None
-        for f in get_files_by_prefix("Chassis"):
-            c = import_and_get_root(col, os.path.join(tank_path, f))
+        for idx, int_path in enumerate(get_available_parts("Chassis")):
+            c_col = col if idx == 0 else extra_col
+            c = import_and_get_root(c_col, int_path, finder, import_ctx)
             if c:
                 c["wot_part"] = "Chassis"
-                c.parent = tank_master
-                if not chassis_obj: chassis_obj = c
+                if idx == 0: 
+                    c.parent = tank_master
+                    chassis_obj = c
 
         update_ui_progress(35, "Loading Hull...")
         hull_obj = None
-        for f in get_files_by_prefix("Hull"):
-            h = import_and_get_root(col, os.path.join(tank_path, f))
+        for idx, int_path in enumerate(get_available_parts("Hull")):
+            h_col = col if idx == 0 else extra_col
+            h = import_and_get_root(h_col, int_path, finder, import_ctx)
             if h:
                 h["wot_part"] = "Hull"
-                h.parent = tank_master
-                if chassis_obj:
-                    context.view_layer.update()
-                    target_mtx = get_bone_matrix_world(chassis_obj, "V")
-                    if target_mtx: h.matrix_world = target_mtx.copy()
-                if not hull_obj: hull_obj = h
+                if idx == 0:
+                    h.parent = tank_master
+                    hull_obj = h
+                    if chassis_obj:
+                        context.view_layer.update()
+                        target_mtx = get_bone_matrix_world(chassis_obj, "V")
+                        if target_mtx: h.matrix_world = target_mtx.copy()
 
         update_ui_progress(60, "Loading Turrets...")
         turret_objs = []
-        # Sort alphabetically to process 01 first, then 02, etc.
-        turret_files = sorted(get_files_by_prefix("Turret_"))
-        for idx, f in enumerate(turret_files):
-            is_primary = (idx == 0)
-            target_col = col if is_primary else extra_col
-            
-            t = import_and_get_root(target_col, os.path.join(tank_path, f))
+        for idx, int_path in enumerate(get_available_parts("Turret")):
+            t_col = col if idx == 0 else extra_col
+            t = import_and_get_root(t_col, int_path, finder, import_ctx)
             if t:
                 t["wot_part"] = "Turret"
-                
-                if is_primary:
+                if idx == 0: 
                     t.parent = tank_master
                     turret_objs.append(t)
-                
-                if hull_obj:
-                    context.view_layer.update()
-                    target_mtx = get_bone_matrix_world(hull_obj, "HP_turretJoint")
-                    if target_mtx: t.matrix_world = target_mtx.copy()
+                    if hull_obj:
+                        context.view_layer.update()
+                        target_mtx = get_bone_matrix_world(hull_obj, "HP_turretJoint")
+                        if target_mtx: t.matrix_world = target_mtx.copy()
 
         update_ui_progress(85, "Loading Guns...")
-        gun_files = sorted(get_files_by_prefix("Gun_"))
-        for idx, f in enumerate(gun_files):
-            is_primary = (idx == 0)
-            target_col = col if is_primary else extra_col
-            
-            g = import_and_get_root(target_col, os.path.join(tank_path, f))
+        for idx, int_path in enumerate(get_available_parts("Gun")):
+            g_col = col if idx == 0 else extra_col
+            g = import_and_get_root(g_col, int_path, finder, import_ctx)
             if g:
                 g["wot_part"] = "Gun"
-                
-                if is_primary:
+                if idx == 0: 
                     g.parent = tank_master
-                    
-                if turret_objs:
-                    context.view_layer.update()
-                    target_mtx = get_bone_matrix_world(turret_objs[0], "HP_gunJoint")
-                    if target_mtx: g.matrix_world = target_mtx.copy()
+                    if turret_objs:
+                        context.view_layer.update()
+                        target_mtx = get_bone_matrix_world(turret_objs[0], "HP_gunJoint")
+                        if target_mtx: g.matrix_world = target_mtx.copy()
+
+        if layer_col: layer_col.exclude = True
 
         update_ui_progress(100, "Finishing...")
         wm.progress_end()
         context.workspace.status_text_set(None)
 
         self.report({'INFO'}, f"{tank_id} successfully imported!")
-        import shutil
-        try:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            tex_temp = os.path.join(tempfile.gettempdir(), "WoT_Blender_Temp_Textures")
-            shutil.rmtree(tex_temp, ignore_errors=True)
-        except: pass
         return {'FINISHED'}
-
 
 
 # --- MATERIAL PANEL ---
@@ -731,7 +740,7 @@ class Import_From_ModelFile(bpy.types.Operator, ImportHelper):
     def execute(self, context):
         try:
             col = bpy.context.view_layer.active_layer_collection.collection
-            if self.import_textures: load_bw_primitive_textured(col, Path(self.filepath), self.import_empty)
+            if self.import_textures: load_bw_primitive_textured(col, Path(self.filepath), self.import_empty, finder=_global_finder, context={'last_pkg': None})
             else: load_bw_primitive_from_file(col, Path(self.filepath), self.import_empty)
         except Exception: return {"CANCELLED"}
         return {"FINISHED"}
@@ -770,7 +779,7 @@ class MATERIAL_OT_read_uv_bounds(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        return obj and obj.type == 'MESH' and obj.active_material
+        return obj and obj.type in {'EMPTY', 'ARMATURE'} and "bw_export_base_path" not in obj
     def execute(self, context):
         return {'FINISHED'}
 
@@ -789,10 +798,6 @@ class Export_VfxFile(bpy.types.Operator, ExportHelper):
 
 # --- EXPORT HELPERS ---
 def get_nodes_by_empty(obj, export_info, bone=None, is_root=True):
-    """
-    İsmine aldanma, kod kırılmasın diye aynı ismi bıraktık. 
-    Artık Empty objeleri değil, ARMATURE içindeki kemikleri tarıyor.
-    """
     from mathutils import Matrix
     
     if is_root:
@@ -803,14 +808,21 @@ def get_nodes_by_empty(obj, export_info, bone=None, is_root=True):
         if obj and obj.type == 'ARMATURE':
             for root_bone in obj.data.bones:
                 if not root_bone.parent:
-                    get_nodes_by_empty(obj, export_info[node_name]["children"], root_bone, False)
-        
+                    if root_bone.name == "Scene Root":
+                        for child_bone in root_bone.children:
+                            get_nodes_by_empty(obj, export_info[node_name]["children"], child_bone, False)
+                    else:
+                        get_nodes_by_empty(obj, export_info[node_name]["children"], root_bone, False)
         obj_models = [c for c in obj.children if c.type == 'MESH']
         return obj_models
-        
+    
     else:
         node_name = bone.name
-        
+        if node_name == "Scene Root":
+             for child_bone in bone.children:
+                 get_nodes_by_empty(obj, export_info, child_bone, False)
+             return
+
         if bone.parent:
             local_mat = bone.parent.matrix_local.inverted() @ bone.matrix_local
         else:
@@ -821,7 +833,25 @@ def get_nodes_by_empty(obj, export_info, bone=None, is_root=True):
         
         for child_bone in bone.children:
             get_nodes_by_empty(obj, export_info[node_name]["children"], child_bone, False)
+VF_ITEMS = [
+    ("set3/xyznuviiiwwtbpc", "40-byte (Skinned/Standard)", ""),
+    ("set3/xyznuvitbpc", "36-byte (xyznuvitbpc)", ""),
+    ("set3/xyznuvtbpc", "32-byte (xyznuvtbpc)", ""),
+    ("set3/xyznuviiiwwpc", "32-byte (xyznuviiiwwpc)", ""),
+    ("set3/xyznuvpc", "24-byte (Lightonly)", ""),
+    ("xyz", "12-byte (xyz)", "")
+]
 
+SHADER_ITEMS = [
+    ("shaders/std_effects/PBS_tank_skinned.fx", "PBS_tank_skinned.fx", ""),
+    ("shaders/std_effects/PBS_tank.fx", "PBS_tank.fx", ""),
+    ("shaders/custom/vector_animation_2.fx", "vector_animation_2.fx (Light/Anim)", "") # <-- YOL DÜZELTİLDİ
+]
+
+SPACE_ITEMS = [
+    ("LOCAL", "Local (Bone/Skinned)", ""),
+    ("GLOBAL", "Global (Scene Root)", "")
+]
 
 class Export_ModelFile(bpy.types.Operator, ExportHelper):
     bl_idname = "export_model.bwmodel"
@@ -832,66 +862,84 @@ class Export_ModelFile(bpy.types.Operator, ExportHelper):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        return obj and obj.type == 'EMPTY' and "bw_export_base_path" not in obj
-
-    export_system: bpy.props.EnumProperty(
-        name="Export System",
-        items=(("WOTCUK", "by wotcuk (Modern)", ""), ("LEGACY", "by SkepticalFox (Legacy)", "")),
-        default="WOTCUK"
-    )
-
-    vertex_format: bpy.props.EnumProperty(
-        name="Vertex Format",
-        items=(("STANDARD", "Standard Tank", ""), ("LIGHT_VOLUME", "Simple / light", "")),
+        return obj and obj.type in {'EMPTY', 'ARMATURE'}
+        
+    export_template: bpy.props.EnumProperty(
+        name="Export Templates",
+        items=(("STANDARD", "Standard Tank", ""), ("SIMPLE", "Simple / Light", ""), ("MANUAL", "Manual (Advanced)", "")),
         default="STANDARD"
     )
     
     export_models: bpy.props.BoolProperty(name="Export Models (.model, .visual, .prim)", default=True)
     export_textures: bpy.props.BoolProperty(name="Export Textures (.dds)", default=True)
-
-    visual_type: bpy.props.EnumProperty(name="Visual type", items=(("STATIC", "Static", ""), ("SKINNED", "Animated", "")), default="SKINNED")
-    is_processed: bpy.props.BoolProperty(name="Processed", default=False)
+    exp_manual_tawso: bpy.props.BoolProperty(name="Manual TreatAsWorldSpace", default=False)
+    exp_tawso: bpy.props.BoolProperty(name="Treat As World Space Object", default=True)
+    exp_vcolors: bpy.props.BoolProperty(name="Export Vertex Colors", default=True)
+    exp_manual_vf: bpy.props.BoolProperty(name="Manual Vertex Format", default=False)
+    exp_vf: bpy.props.EnumProperty(items=VF_ITEMS)
+    exp_manual_space: bpy.props.BoolProperty(name="Manual Coordinate Space", default=False)
+    exp_space: bpy.props.EnumProperty(items=SPACE_ITEMS)
+    exp_manual_shader: bpy.props.BoolProperty(name="Manual Shader", default=False)
+    exp_shader: bpy.props.EnumProperty(items=SHADER_ITEMS)
 
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "export_system")
+        layout.prop(self, "export_models")
+        layout.prop(self, "export_textures")
         layout.separator()
-        if self.export_system == "WOTCUK":
+        layout.prop(self, "export_template")
+        if self.export_template == "MANUAL":
             box = layout.box()
-            box.prop(self, "vertex_format")
-            box.prop(self, "export_models")
-            box.prop(self, "export_textures")
-        else:
-            box = layout.box()
-            box.prop(self, "visual_type")
-            box.prop(self, "is_processed")
+            box.prop(self, "exp_vcolors")
+            
+            box.prop(self, "exp_manual_vf")
+            if self.exp_manual_vf: box.prop(self, "exp_vf", text="")
+                
+            box.prop(self, "exp_manual_space")
+            if self.exp_manual_space: box.prop(self, "exp_space", text="")
+                
+            box.prop(self, "exp_manual_shader")
+            if self.exp_manual_shader: box.prop(self, "exp_shader", text="")
+            
+            box.prop(self, "exp_manual_tawso")
+            if self.exp_manual_tawso: box.prop(self, "exp_tawso")
 
     def execute(self, context):
-        obj = context.selected_objects[0]
+        obj = context.active_object
+        if not obj: return {'CANCELLED'}
+            
         export_info = {"nodes": {}}
-        export_info["vertex_format"] = self.vertex_format 
         export_info["export_models"] = self.export_models
         export_info["export_textures"] = self.export_textures
         export_info["root_matrix"] = obj.matrix_world.copy()
         export_info["original_filename"] = obj.get("bw_export_filename", "")
+        export_info["export_vcolors"] = True # Varsayılan
+        
+        if self.export_template == "STANDARD":
+            export_info["use_manual_shader"] = True
+            export_info["manual_shader"] = "shaders/std_effects/PBS_tank_skinned.fx"
+            
+        elif self.export_template == "SIMPLE":
+            export_info["use_manual_shader"] = True
+            export_info["manual_shader"] = "shaders/custom/vector_animation_2.fx"
+            
+        elif self.export_template == "MANUAL":
+            export_info["export_vcolors"] = self.exp_vcolors
+            export_info["use_manual_vf"] = self.exp_manual_vf
+            export_info["manual_vf"] = self.exp_vf
+            export_info["use_manual_space"] = self.exp_manual_space
+            export_info["manual_space"] = self.exp_space
+            export_info["use_manual_shader"] = self.exp_manual_shader
+            export_info["manual_shader"] = self.exp_shader
+            export_info["use_manual_tawso"] = self.exp_manual_tawso
+            export_info["manual_tawso"] = self.exp_tawso
+
         obj_models = get_nodes_by_empty(obj, export_info["nodes"])
-
         if not len(obj_models): return {'CANCELLED'}
-        export_info["exporter_version"] = "%s.%s.%s" % bl_info["version"]
 
-        if self.export_system == "WOTCUK":
-            bw_exporter = BigWorldModelExporter()
-            bw_exporter.export(obj_models, self.filepath, export_info)
-        else:
-            if self.visual_type == "STATIC":
-                export_model = self.get_export_object(obj_models)
-                export_model.data.transform(export_model.matrix_world)
-                bw_exporter = BigWorldModelExporterProcessed() if self.is_processed else BigWorldModelExporter()
-                bw_exporter.export(export_model, self.filepath, export_info)
-                bpy.data.objects.remove(export_model)
-            else:
-                bw_exporter = BigWorldModelExporterSkinnedProcessed() if self.is_processed else BigWorldModelExporterSkinned()
-                bw_exporter.export(obj_models, self.filepath, export_info)
+        from .export_bw_primitives import BigWorldModelExporter
+        bw_exporter = BigWorldModelExporter()
+        bw_exporter.export(obj_models, self.filepath, export_info)
 
         return {"FINISHED"}
 
@@ -899,18 +947,16 @@ class Export_WoT_Tank_Quick(bpy.types.Operator):
     bl_idname = "export_model.wot_tank_quick"
     bl_label = "Auto-Export Tank to res_mods"
     bl_options = {'REGISTER', 'UNDO'}
-    
     show_dialog: bpy.props.BoolProperty(default=False, options={'HIDDEN'})
     
     @classmethod
     def poll(cls, context):
-        return True 
+        obj = context.active_object
+        return obj and obj.type == 'EMPTY'
         
     def invoke(self, context, event):
-        if self.show_dialog:
-            return context.window_manager.invoke_props_dialog(self, width=400)
-        else:
-            return self.execute(context)
+        if self.show_dialog: return context.window_manager.invoke_props_dialog(self, width=400)
+        else: return self.execute(context)
             
     def draw(self, context):
         layout = self.layout
@@ -924,29 +970,28 @@ class Export_WoT_Tank_Quick(bpy.types.Operator):
             layout.prop(scn, "wot_export_has_parent")
             if scn.wot_export_has_parent:
                 layout.prop(scn, "wot_export_extent")
-    
+                
+        layout.separator()
+        layout.label(text="Advanced Overrides", icon='MODIFIER')
+        box = layout.box()
+        box.prop(scn, "wot_exp_vcolors")
+        
+        box.prop(scn, "wot_exp_manual_vf")
+        if scn.wot_exp_manual_vf: box.prop(scn, "wot_exp_vf", text="")
+            
+        box.prop(scn, "wot_exp_manual_space")
+        if scn.wot_exp_manual_space: box.prop(scn, "wot_exp_space", text="")
+            
+        box.prop(scn, "wot_exp_manual_shader")
+        if scn.wot_exp_manual_shader: box.prop(scn, "wot_exp_shader", text="")
+        box.prop(scn, "wot_exp_manual_tawso")
+        if scn.wot_exp_manual_tawso: box.prop(scn, "wot_exp_tawso")
     def execute(self, context):
         scn = context.scene
-        obj = context.active_object
+        target_tank = context.active_object
         
-        # SMART TARGET FINDER: Climb up from active object to find Tank Root
-        target_tank = None
-        curr = obj
-        while curr:
-            if curr.type == 'EMPTY' and "bw_export_base_path" in curr:
-                target_tank = curr
-                break
-            curr = curr.parent
-            
-        # Fallback: Scan scene objects to find the first valid tank root
-        if not target_tank:
-            for o in scn.objects:
-                if o.type == 'EMPTY' and "bw_export_base_path" in o:
-                    target_tank = o
-                    break
-                    
-        if not target_tank:
-            self.report({'ERROR'}, "No Tank Root (Empty) object found in the scene to export!")
+        if not target_tank or "bw_export_base_path" not in target_tank:
+            self.report({'ERROR'}, "Selected object is not a valid Tank Root!")
             return {'CANCELLED'}
             
         prefs = context.preferences.addons[__package__].preferences
@@ -970,14 +1015,21 @@ class Export_WoT_Tank_Quick(bpy.types.Operator):
         os.makedirs(export_dir, exist_ok=True)
         
         export_info = {
-            "vertex_format": "STANDARD", 
-            "export_models": True,
-            "export_textures": True,
+            "export_models": True, "export_textures": True,
             "wot_export_with_lods": scn.wot_export_with_lods,
             "wot_export_lod": scn.wot_export_lod,
             "wot_export_has_parent": scn.wot_export_has_parent,
             "wot_export_extent": scn.wot_export_extent,
-            "wot_base_path": base_path
+            "wot_base_path": base_path,
+            "export_vcolors": scn.wot_exp_vcolors,
+            "use_manual_vf": scn.wot_exp_manual_vf,
+            "manual_vf": scn.wot_exp_vf,
+            "use_manual_space": scn.wot_exp_manual_space,
+            "manual_space": scn.wot_exp_space,
+            "use_manual_shader": scn.wot_exp_manual_shader,
+            "manual_shader": scn.wot_exp_shader,
+            "use_manual_tawso": scn.wot_exp_manual_tawso,
+            "manual_tawso": scn.wot_exp_tawso
         }
         
         from .export_bw_primitives import BigWorldModelExporter
@@ -1034,6 +1086,9 @@ classes = (
     Import_From_ModelFile,
     Import_From_EffFile,
     Import_From_VfxFile,
+    Import_WoT_Sequence,
+    Import_WoT_Dummy_Load,
+    Import_From_AnimFile,
     Export_ModelFile,
     Export_VfxFile,
     NODE_OT_add_wot_vfx_node,
@@ -1042,8 +1097,6 @@ classes = (
     WoT_TankItem,                
     WOT_UL_TankList,
     VIEW3D_PT_wot_import_panel,  
-    Import_WoT_Dummy_Load,
-    Import_From_AnimFile,
     Export_WoT_Tank_Quick
 )
 
@@ -1056,6 +1109,7 @@ def register():
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_eff)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_vfx)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import_anim)
+    bpy.types.TOPBAR_MT_file_import.append(menu_func_import_seq)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.types.NODE_MT_add.append(menu_func_add_wot_node)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export_vfx)
@@ -1063,7 +1117,7 @@ def register():
     if auto_load_vfx_lib_handler not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(auto_load_vfx_lib_handler)
     
-    bpy.types.Material.BigWorld_Shader_Path = bpy.props.StringProperty(name="fx", default="shaders/std_effects/lightonly.fx")
+    bpy.types.Material.BigWorld_Shader_Path = bpy.props.StringProperty(name="fx", default="shaders/std_effects/PBS_tank_skinned.fx")
 
     if 'visual_property_descr_dict' in globals():
         for name, desc in visual_property_descr_dict.items():
@@ -1080,7 +1134,15 @@ def register():
                 custom_icons.load(name, os.path.join(icons_dir, img), 'IMAGE')
 
     bpy.types.Scene.wot_is_path_valid = bpy.props.BoolProperty(default=False)
-    
+    bpy.types.Scene.wot_exp_manual_tawso = bpy.props.BoolProperty(name="Manual TreatAsWorldSpace", default=False)
+    bpy.types.Scene.wot_exp_tawso = bpy.props.BoolProperty(name="Treat As World Space Object", default=True)
+    bpy.types.Scene.wot_exp_vcolors = bpy.props.BoolProperty(name="Export Vertex Colors", default=True)
+    bpy.types.Scene.wot_exp_manual_vf = bpy.props.BoolProperty(name="Manual Vertex Format", default=False)
+    bpy.types.Scene.wot_exp_vf = bpy.props.EnumProperty(items=VF_ITEMS)
+    bpy.types.Scene.wot_exp_manual_space = bpy.props.BoolProperty(name="Manual Space", default=False)
+    bpy.types.Scene.wot_exp_space = bpy.props.EnumProperty(items=SPACE_ITEMS)
+    bpy.types.Scene.wot_exp_manual_shader = bpy.props.BoolProperty(name="Manual Shader", default=False)
+    bpy.types.Scene.wot_exp_shader = bpy.props.EnumProperty(items=SHADER_ITEMS)
     bpy.types.Scene.wot_selected_tier = bpy.props.EnumProperty(items=get_dynamic_tiers, update=update_tank_list)
     bpy.types.Scene.wot_selected_nation = bpy.props.EnumProperty(items=get_static_nations, update=update_tank_list) 
     bpy.types.Scene.wot_selected_type = bpy.props.EnumProperty(items=get_static_types, update=update_tank_list) 
@@ -1132,6 +1194,7 @@ def unregister():
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_eff)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_vfx)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_anim)
+    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_seq)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export_vfx)
     bpy.types.NODE_MT_add.remove(menu_func_add_wot_node)

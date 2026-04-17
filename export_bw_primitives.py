@@ -2,13 +2,13 @@ import os
 import subprocess
 from struct import pack
 from xml.dom.minidom import getDOMImplementation
+from .exportdatamesh import ExportDataMesh 
 import bpy
 import math
 from mathutils import Vector, Matrix, Euler
 
 # --- SMART NAME AND PATH RESOLVER ---
 def get_universal_config(obj, export_path, export_info):
-    # Get the original file name passed from init.py
     original_filename = export_info.get("original_filename", "")
     
     lower_name = obj.name.lower()
@@ -24,7 +24,6 @@ def get_universal_config(obj, export_path, export_info):
         forced_filename = obj.name.split('.')[0]
         part_suffix = forced_filename.lower()
 
-    # --- NEW: If the object has an original name, discard guessed names and use the original! ---
     if original_filename:
         forced_filename = original_filename
 
@@ -103,7 +102,6 @@ def get_real_mesh_objects(selected_objs):
     return [o for o in selected_objs if hasattr(o, 'type') and o.type == 'MESH']
 
 def get_armature(mesh_objs):
-    """Finds the main Armature object that the meshes are parented to."""
     for obj in mesh_objs:
         if obj.parent and obj.parent.type == 'ARMATURE': return obj.parent
         for mod in obj.modifiers:
@@ -111,21 +109,12 @@ def get_armature(mesh_objs):
     return None
 
 def get_pose_bone_matrix(arm_obj, bone_name):
-    """Returns the world matrix of the PoseBone within the Armature."""
     if arm_obj and bone_name in arm_obj.pose.bones:
         return arm_obj.matrix_world @ arm_obj.pose.bones[bone_name].matrix
     return None
 
-def pack_normal_int(n):
-    try:
-        n = n.normalized()
-        x, y, z = int((n.x + 1.0) * 127.5), int((n.y + 1.0) * 127.5), int((n.z + 1.0) * 127.5)
-        return ((max(0, min(255, z)) & 0xFF) << 16) | ((max(0, min(255, y)) & 0xFF) << 8) | (max(0, min(255, x)) & 0xFF)
-    except: return 0x808080 
-
 # --- PNG TO DDS CONVERTER ---
 def convert_png_to_dds(png_path):
-    """Converts PNG to DDS using Texconv."""
     addon_dir = os.path.dirname(__file__)
     texconv_path = os.path.join(addon_dir, "texconv.exe")
     
@@ -134,8 +123,6 @@ def convert_png_to_dds(png_path):
         return False
         
     try:
-        # GMM and Diffuse (AM) textures use standard BC1 (DXT1)
-        # ANM (Normal Map) textures natively use BC7_UNORM! (To preserve Blue and Alpha channels)
         if "_anm" in png_path.lower():
             format_arg = "BC7_UNORM" 
         else:
@@ -170,7 +157,38 @@ class BigWorldModelExporter:
         dir_name = os.path.dirname(model_filepath)
         final_model_path, final_visual_path, final_primitives_path = [os.path.join(dir_name, FORCED_FILENAME + ext) for ext in [".model", ".visual_processed", ".primitives_processed"]]
 
-        processed_groups, all_vertices_flat, all_colors_flat = [], [], []
+        mesh_exporter = ExportDataMesh(final_primitives_path, FORCED_FILENAME)
+        
+        primary_fx_path = "shaders/std_effects/PBS_tank_skinned.fx"
+        if export_info.get("use_manual_shader", False):
+            primary_fx_path = export_info.get("manual_shader", primary_fx_path)
+        else:
+            for obj in mesh_objs:
+                if obj.data.materials and len(obj.data.materials) > 0:
+                    bmat = obj.data.materials[0]
+                    if bmat and hasattr(bmat, "BigWorld_Shader_Path") and bmat.BigWorld_Shader_Path:
+                        primary_fx_path = bmat.BigWorld_Shader_Path
+                        break
+
+        fx_lower = primary_fx_path.lower()
+        if "pbs_tank_skinned" in fx_lower:
+            auto_vf, auto_space, auto_tawso = "set3/xyznuviiiwwtbpc", "LOCAL", True
+        elif "pbs_tank" in fx_lower:
+            auto_vf, auto_space, auto_tawso = "set3/xyznuviiiwwtbpc", "GLOBAL", False
+        elif "vector_animation_2" in fx_lower: 
+            auto_vf, auto_space, auto_tawso = "set3/xyznuvpc", "GLOBAL", False 
+        else:
+            auto_vf, auto_space, auto_tawso = "set3/xyznuviiiwwtbpc", "LOCAL", True 
+
+        final_vf = export_info.get("manual_vf") if export_info.get("use_manual_vf") else auto_vf
+        final_space = export_info.get("manual_space") if export_info.get("use_manual_space") else auto_space
+        final_tawso = export_info.get("manual_tawso") if export_info.get("use_manual_tawso") else auto_tawso
+
+        mesh_exporter.vertex_format = final_vf
+        mesh_exporter.coordinate_mode = "LOCAL" 
+        user_wants_vcolors = export_info.get("export_vcolors", True)
+
+        processed_groups = []
         global_v_offset = global_i_offset = 0
         global_has_colors = False
         bb_min, bb_max = Vector((99999.0, 99999.0, 99999.0)), Vector((-99999.0, -99999.0, -99999.0))
@@ -185,43 +203,28 @@ class BigWorldModelExporter:
                 except: pass 
             uv_layer = mesh.uv_layers.active.data[:] if mesh.uv_layers.active else None
             
-            # Fetch Root Matrix (To align boneless static parts to the root)
             root_matrix = export_info.get("root_matrix", Matrix())
             root_inv_matrix = root_matrix.inverted()
             
             user_rot = Euler((math.radians(ROTATION_OFFSET_X), 0, 0), 'XYZ').to_matrix().to_4x4()
-            
-            # FIX: final_matrix must remain in World coordinates to prevent skinned models from breaking!
             final_matrix = user_rot @ obj.matrix_world
             rotation_matrix = final_matrix.to_3x3()
 
-            # --- READ COLOR LAYER ---
-            target_color_name = None
             color_layer = None
             if obj.data.color_attributes and obj.data.color_attributes.active:
-                target_color_name = obj.data.color_attributes.active.name
-            elif obj.data.color_attributes and len(obj.data.color_attributes) > 0:
-                target_color_name = obj.data.color_attributes[0].name
-
-            if target_color_name and target_color_name in obj.data.attributes:
-                color_layer = obj.data.attributes[target_color_name]
-            elif 'BPVScolour' in obj.data.attributes:
-                color_layer = obj.data.attributes['BPVScolour']
-            elif 'colour' in obj.data.attributes:
-                color_layer = obj.data.attributes['colour']
-                
+                color_layer = obj.data.attributes[obj.data.color_attributes.active.name]
+            
             color_data_flat = []
             color_domain = 'POINT'
             
-            if color_layer:
+            if color_layer and user_wants_vcolors:
                 global_has_colors = True
+                mesh_exporter.export_vertex_colors = True
                 color_domain = color_layer.domain
                 count = len(obj.data.loops) if color_domain == 'CORNER' else len(obj.data.vertices)
                 color_data_flat = [1.0] * (count * 4) 
-                try:
-                    color_layer.data.foreach_get("color", color_data_flat)
-                except:
-                    pass
+                try: color_layer.data.foreach_get("color", color_data_flat)
+                except: pass
             
             tris_by_mat = {}
             for tri in mesh.loop_triangles: tris_by_mat.setdefault(tri.material_index, []).append(tri)
@@ -229,15 +232,21 @@ class BigWorldModelExporter:
             for mat_idx in sorted(tris_by_mat.keys()):
                 bmat = mesh.materials[mat_idx] if mat_idx < len(mesh.materials) else None
                 mat_name = bmat.name if bmat else f"mat_{mat_idx}"
-                fx_path = "shaders/std_effects/PBS_tank_skinned.fx"
+                
+                group_fx_path = primary_fx_path
+                if not export_info.get("use_manual_shader", False):
+                    if bmat and hasattr(bmat, "BigWorld_Shader_Path") and bmat.BigWorld_Shader_Path:
+                        group_fx_path = bmat.BigWorld_Shader_Path
                 
                 group_data = {
                     'mat_name': mat_name,
                     'bmat': bmat, 
-                    'fx': fx_path,
-                    'vertices': [], 'indices': [], 'colors': [], 'startVertex': global_v_offset, 'startIndex': global_i_offset
+                    'fx': group_fx_path,
+                    'indices': [], 'startVertex': global_v_offset, 'startIndex': global_i_offset, 
+                    'nVertices': 0, 'nPrimitives': 0
                 }
                 local_v_cache = {} 
+                
                 for tri in tris_by_mat[mat_idx]:
                     for loop_idx in reversed(tri.loops):
                         loop_data, vert = mesh.loops[loop_idx], mesh.vertices[mesh.loops[loop_idx].vertex_index]
@@ -245,204 +254,136 @@ class BigWorldModelExporter:
                         world_co = final_matrix @ vert.co
                         world_n = rotation_matrix @ loop_data.normal
 
-                        # --- GET COLOR DATA (ONLY IF IT EXISTS) ---
                         if global_has_colors and color_data_flat:
                             idx = loop_idx if color_domain == 'CORNER' else vert.index
                             base_i = idx * 4
-                            r = color_data_flat[base_i]
-                            g = color_data_flat[base_i + 1]
-                            b = color_data_flat[base_i + 2]
-                            a = color_data_flat[base_i + 3]
-                            
-                            b_val = max(0, min(255, int(b * 255.0)))
-                            g_val = max(0, min(255, int(g * 255.0)))
-                            r_val = max(0, min(255, int(r * 255.0)))
-                            a_val = max(0, min(255, int(a * 255.0)))
-                            rgba = (b_val, g_val, r_val, a_val)
+                            r, g, b, a = color_data_flat[base_i], color_data_flat[base_i+1], color_data_flat[base_i+2], color_data_flat[base_i+3]
+                            rgba = (r, g, b, a)
                         else:
                             rgba = (0, 0, 0, 0)
-
-                        bone_name = None
-                        main_bone_idx = 0
-                        if vert.groups:
-                            g_list = sorted(vert.groups, key=lambda g: g.weight, reverse=True)[:1]
-                            if g_list and g_list[0].group in vg_id_map:
-                                main_bone_idx = vg_id_map[g_list[0].group]
-                                bone_name = bone_palette[main_bone_idx]
-                        
-                        has_valid_bone = bone_name and armature_obj and (bone_name in armature_obj.pose.bones)
-
-                        if has_valid_bone:
-                            valid_groups = []
-                            if vert.groups:
-                                g_list = sorted(vert.groups, key=lambda g: g.weight, reverse=True)
-                                valid_groups = [g for g in g_list if g.group in vg_id_map][:3]
-                            
-                            active_groups = [g for g in valid_groups if g.weight > 0.0]
-                            
-                            # IF ATTACHED TO MULTIPLE BONES (Blended Axis Calculation)
-                            if len(active_groups) > 1:
-                                total_weight = sum(g.weight for g in active_groups)
-                                blended_mat = Matrix(((0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0)))
-                                
-                                for g in active_groups:
-                                    b_idx = vg_id_map[g.group]
-                                    b_name = bone_palette[b_idx]
-                                    mat = get_pose_bone_matrix(armature_obj, b_name) or Matrix()
-                                    w_ratio = g.weight / total_weight
-                                    blended_mat += mat * w_ratio
-                                
-                                try:
-                                    inv_m = blended_mat.inverted()
-                                except:
-                                    fallback_mat = get_pose_bone_matrix(armature_obj, bone_palette[vg_id_map[active_groups[0].group]])
-                                    inv_m = fallback_mat.inverted() if fallback_mat else Matrix()
-                                    
-                                local_co = inv_m @ world_co
-                                local_n = inv_m.to_3x3() @ world_n
-                                if local_n.length > 0.0001: local_n.normalize()
-                                    
-                            # IF SINGLE BONE
-                            else:
-                                primary_bone_name = bone_name
-                                if active_groups: primary_bone_name = bone_palette[vg_id_map[active_groups[0].group]]
-                                elif valid_groups: primary_bone_name = bone_palette[vg_id_map[valid_groups[0].group]]
-                                    
-                                primary_bone_mat = get_pose_bone_matrix(armature_obj, primary_bone_name)
-                                
-                                if primary_bone_mat:
-                                    inv_m = primary_bone_mat.inverted()
-                                    local_co = inv_m @ world_co
-                                    local_n = inv_m.to_3x3() @ world_n
-                                else:
-                                    local_co = root_inv_matrix @ world_co
-                                    local_n = root_inv_matrix.to_3x3() @ world_n
-                        else:
-                            # Static / Boneless model
+                        out_bones = []
+                        if final_space == "GLOBAL":
                             local_co = root_inv_matrix @ world_co
                             local_n = root_inv_matrix.to_3x3() @ world_n
+                        else:
+                            bone_name = None
+                            if vert.groups:
+                                g_list = sorted(vert.groups, key=lambda g: g.weight, reverse=True)[:1]
+                                if g_list and g_list[0].group in vg_id_map:
+                                    bone_name = bone_palette[vg_id_map[g_list[0].group]]
+                            
+                            has_valid_bone = bone_name and armature_obj and (bone_name in armature_obj.pose.bones)
 
+                            if has_valid_bone:
+                                valid_groups = []
+                                if vert.groups:
+                                    g_list = sorted(vert.groups, key=lambda g: g.weight, reverse=True)
+                                    valid_groups = [g for g in g_list if g.group in vg_id_map][:3]
+                                
+                                active_groups = [g for g in valid_groups if g.weight > 0.0]
+                                
+                                if len(active_groups) > 1:
+                                    total_weight = sum(g.weight for g in active_groups)
+                                    blended_mat = Matrix(((0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0)))
+                                    for g in active_groups:
+                                        mat = get_pose_bone_matrix(armature_obj, bone_palette[vg_id_map[g.group]]) or Matrix()
+                                        blended_mat += mat * (g.weight / total_weight)
+                                    try: inv_m = blended_mat.inverted()
+                                    except:
+                                        fallback_mat = get_pose_bone_matrix(armature_obj, bone_palette[vg_id_map[active_groups[0].group]])
+                                        inv_m = fallback_mat.inverted() if fallback_mat else Matrix()
+                                    local_co = inv_m @ world_co
+                                    local_n = inv_m.to_3x3() @ world_n
+                                    if local_n.length > 0.0001: local_n.normalize()
+                                        
+                                else:
+                                    primary_bone_name = bone_name
+                                    if active_groups: primary_bone_name = bone_palette[vg_id_map[active_groups[0].group]]
+                                    elif valid_groups: primary_bone_name = bone_palette[vg_id_map[valid_groups[0].group]]
+                                    primary_bone_mat = get_pose_bone_matrix(armature_obj, primary_bone_name)
+                                    
+                                    if primary_bone_mat:
+                                        inv_m = primary_bone_mat.inverted()
+                                        local_co = inv_m @ world_co
+                                        local_n = inv_m.to_3x3() @ world_n
+                                    else:
+                                        local_co = root_inv_matrix @ world_co
+                                        local_n = root_inv_matrix.to_3x3() @ world_n
+                                        
+                                for g in valid_groups:
+                                    out_bones.append((vg_id_map[g.group], g.weight))
+                            else:
+                                local_co = root_inv_matrix @ world_co
+                                local_n = root_inv_matrix.to_3x3() @ world_n
+
+
+                        # Bounding Box ve Cache
                         pos_bw = (local_co.x, local_co.z, local_co.y) 
-                        n_bw = Vector((local_n.x, local_n.z, local_n.y)).normalized()
-
-                        # Update Bounding Box
                         for i in range(3):
                             bb_min[i], bb_max[i] = min(bb_min[i], pos_bw[i] - 0.01), max(bb_max[i], pos_bw[i] + 0.01)
 
-                        n_packed = pack_normal_int(n_bw)
+                        uv = uv_layer[loop_idx].uv if uv_layer else (0.0, 0.0)
                         
-                        t_packed = b_packed = 0x808080
+                        world_tang = world_binorm = None
                         if uv_layer:
-                            t_bw = (rotation_matrix @ loop_data.tangent).normalized()
-                            t_bw = Vector((t_bw.x, t_bw.z, -t_bw.y)).normalized()
-                            b_bw = n_bw.cross(t_bw).normalized()
-                            t_packed, b_packed = pack_normal_int(t_bw), pack_normal_int(b_bw)
+                            world_tang = rotation_matrix @ loop_data.tangent
+                            world_binorm = world_n.cross(world_tang).normalized()
 
-                        u, v = uv_layer[loop_idx].uv if uv_layer else (0.0, 0.0)
-                        
-                        # --- 3-BONE LOGIC ADDED ---
-                        # Unused slots are set to the 0th bone and 0 weight.
-                        bone_indices = [0, 0, 0]
-                        bone_weights = [0, 0, 0]
-                        
-                        if vert.groups:
-                            # Only take the 3 bones with the highest weight
-                            g_list = sorted(vert.groups, key=lambda g: g.weight, reverse=True)
-                            valid_groups = [g for g in g_list if g.group in vg_id_map][:3]
-                            
-                            total_weight = sum(g.weight for g in valid_groups)
-                            
-                            if total_weight > 0:
-                                for i, g in enumerate(valid_groups):
-                                    bone_indices[i] = vg_id_map[g.group] * 3
-                                    bone_weights[i] = int(round((g.weight / total_weight) * 255.0))
-                                
-                                # Complete to ensure the sum is exactly 255
-                                diff = 255 - sum(bone_weights)
-                                if diff != 0:
-                                    bone_weights[0] += diff
-                            else:
-                                bone_weights[0] = 255
-                        else:
-                            bone_weights[0] = 255
-                            
-                        bone_bytes = (
-                            bone_indices[0], bone_indices[1], bone_indices[2],
-                            0, 0,
-                            bone_weights[1], bone_weights[2], bone_weights[0]
+                        bone_cache = tuple((b[0], round(b[1], 4)) for b in out_bones)
+                        v_data_for_cache = (
+                            round(local_co.x, 4), round(local_co.y, 4), round(local_co.z, 4),
+                            round(local_n.x, 4), round(local_n.y, 4), round(local_n.z, 4),
+                            round(uv[0], 4), round(uv[1], 4),
+                            bone_cache, rgba
                         )
-                        
-                        v_data_for_cache = (*pos_bw, n_packed, u, 1.0-v, *bone_bytes, t_packed, b_packed, rgba)
-                        v_data = (*pos_bw, n_packed, u, 1.0-v, *bone_bytes, t_packed, b_packed)
-                        
-                        if v_data_for_cache not in local_v_cache:
-                            local_v_cache[v_data_for_cache] = len(group_data['vertices'])
-                            group_data['vertices'].append(v_data)
-                            if global_has_colors:
-                                group_data['colors'].append(rgba)
-                        group_data['indices'].append(local_v_cache[v_data_for_cache] + global_v_offset)
 
-                group_data['nVertices'], group_data['nPrimitives'] = len(group_data['vertices']), len(group_data['indices']) // 3
-                processed_groups.append(group_data); all_vertices_flat.extend(group_data['vertices'])
-                all_colors_flat.extend(group_data['colors'])
-                global_v_offset += len(group_data['vertices']); global_i_offset += len(group_data['indices'])
+                        if v_data_for_cache not in local_v_cache:
+                            v_idx = mesh_exporter.add_vertex(
+                                pos=local_co, norm=local_n, uv=uv, 
+                                bones=out_bones, rgba=rgba, 
+                                tang=world_tang, binorm=world_binorm
+                            )
+                            local_v_cache[v_data_for_cache] = v_idx
+                            
+                        group_data['indices'].append(local_v_cache[v_data_for_cache])
+
+                group_data['nVertices'] = len(local_v_cache)
+                group_data['nPrimitives'] = len(group_data['indices']) // 3
+                processed_groups.append(group_data)
+                
+                global_v_offset += group_data['nVertices']
+                global_i_offset += len(group_data['indices'])
 
         # --- EXPORTING MODELS (.primitives, .visual, .model) ---
         if export_info.get("export_models", True):
-            # --- EXPORT: .primitives ---
-            with open(final_primitives_path, 'wb') as f:
-                f.write(pack('<I', 0x42a14e65))
-                start_i = f.tell(); is_large = global_v_offset > 65535
-                f.write(pack('64s', b'list32' if is_large else b'list'))
-                f.write(pack('<II', global_i_offset, len(processed_groups))) 
-                for g in processed_groups:
-                    for idx in g['indices']: f.write(pack('<I' if is_large else '<H', idx))
-                for pg in processed_groups: f.write(pack('<4I', pg['startIndex'], pg['nPrimitives'], pg['startVertex'], pg['nVertices']))
-                
-                # --- PADDING A ---
-                pad_i = (4 - (f.tell() % 4)) % 4
-                if pad_i > 0: f.write(b'\x00' * pad_i)
-                size_i = f.tell() - start_i
-                
-                start_v = f.tell(); f.write(pack('64s', b'BPVTxyznuviiiwwtb')); f.write(pack('<I', 0))
-                f.write(pack('64s', b'set3/xyznuviiiwwtbpc')); f.write(pack('<I', global_v_offset))
-                for v in all_vertices_flat: f.write(pack('<3fI2f8B2I', *v))
-                
-                # --- PADDING B ---
-                pad_v = (4 - (f.tell() % 4)) % 4
-                if pad_v > 0: f.write(b'\x00' * pad_v)
-                size_v = f.tell() - start_v
-                
-                # --- 3. BPVScolour Section ---
-                if global_has_colors:
-                    start_c = f.tell()
-                    f.write(pack('64s', b'BPVScolour'))
-                    f.write(pack('<I', 0)); f.write(pack('64s', b'colour'))
-                    for c in all_colors_flat: f.write(pack('4B', *c))
-                    pad_c = (4 - (f.tell() % 4)) % 4
-                    if pad_c > 0: f.write(b'\x00' * pad_c)
-                    size_c = f.tell() - start_c
-
-                s_data = b''; v_n, i_n, c_n = f"{FORCED_FILENAME}.vertices", f"{FORCED_FILENAME}.indices", "colour"
-                
-                sections_to_write = [(i_n, start_i, size_i), (v_n, start_v, size_v)]
-                if global_has_colors:
-                    sections_to_write.append((c_n, start_c, size_c))
-                    
-                for n, o, s in sections_to_write:
-                    n_b = n.encode('utf-8'); pad = (4 - (len(n_b) % 4)) % 4
-                    s_data += pack('<II12sI', s, o, b'\x00'*12, len(n_b)) + n_b + (b'\x00' * pad)
-                f.write(s_data); f.write(pack('<I', len(s_data)))
+            
+            mesh_exporter.processed_groups = processed_groups
+            mesh_exporter.export()
+            
+            v_n = "vertices"
+            i_n = "indices"
+            c_n = "colour"
 
             # --- EXPORT: .visual ---
-            impl = getDOMImplementation(); doc = impl.createDocument(None, 'root', None); root = doc.documentElement
+            impl = getDOMImplementation()
+            visual_root_tag = FORCED_FILENAME + ".visual_processed"
+            doc = impl.createDocument(None, visual_root_tag, None)
+            root = doc.documentElement
+            
             if 'nodes' in export_info: set_nodes(export_info['nodes'], root, doc)
-            rs = doc.createElement('renderSet'); root.appendChild(rs); rs.appendChild(doc.createElement('treatAsWorldSpaceObject')).appendChild(doc.createTextNode('true'))
-            for bb_name in bone_palette: rs.appendChild(doc.createElement('node')).appendChild(doc.createTextNode(bb_name))
+            rs = doc.createElement('renderSet'); root.appendChild(rs)
+            
+            tawso_str = 'true' if final_tawso else 'false'
+            rs.appendChild(doc.createElement('treatAsWorldSpaceObject')).appendChild(doc.createTextNode(tawso_str))
+            
+            if final_space == "GLOBAL":
+                rs.appendChild(doc.createElement('node')).appendChild(doc.createTextNode('Scene Root'))
+            else:
+                for bb_name in bone_palette: rs.appendChild(doc.createElement('node')).appendChild(doc.createTextNode(bb_name))
+                
             geo = doc.createElement('geometry'); rs.appendChild(geo); geo.appendChild(doc.createElement('vertices')).appendChild(doc.createTextNode(v_n))
             geo.appendChild(doc.createElement('primitive')).appendChild(doc.createTextNode(i_n))
             
-            # Save stream
             if global_has_colors:
                 geo.appendChild(doc.createElement('stream')).appendChild(doc.createTextNode(c_n))
                 
@@ -452,7 +393,6 @@ class BigWorldModelExporter:
                 me.appendChild(doc.createElement('fx')).appendChild(doc.createTextNode(pg['fx']))
                 
                 bmat = pg.get('bmat')
-                # If the material has special (bw_) properties from import, write them
                 if bmat and any(k.startswith("bw_") for k in bmat.keys()):
                     for key in bmat.keys():
                         if key.startswith("bw_tex_"):
@@ -470,8 +410,6 @@ class BigWorldModelExporter:
                         elif key.startswith("bw_vector4_"):
                             prop = doc.createElement('property'); prop.appendChild(doc.createTextNode(key[11:])); me.appendChild(prop)
                             prop.appendChild(doc.createElement('Vector4')).appendChild(doc.createTextNode(str(bmat[key])))
-                
-                # If no special properties, use the old (static) system
                 else:
                     for p_n, p_t, p_v in [('doubleSided','Bool','false'),('alphaTestEnable','Bool','false'),('alphaReference','Int','0'),('g_useNormalPackDXT1','Bool','false')]:
                          prop = doc.createElement('property'); prop.appendChild(doc.createTextNode(p_n)); me.appendChild(prop)
@@ -495,30 +433,23 @@ class BigWorldModelExporter:
             # --- EXPORT: .model (NEW DYNAMIC LOD SYSTEM) ---
             mdm = impl.createDocument(None, 'root', None); mroot = mdm.documentElement
             
-            # Fetch LOD and Path Settings from __init__.py
             exp_lods = export_info.get("wot_export_with_lods", False)
             exp_lod = export_info.get("wot_export_lod", "lod0")
             exp_parent = export_info.get("wot_export_has_parent", False)
             exp_extent = export_info.get("wot_export_extent", 20.0)
             
-            # If coming from quick export, base_path is read from there, otherwise it uses the found TANK_BASE_PATH
             base_path = export_info.get("wot_base_path", TANK_BASE_PATH + "/")
             if not base_path.endswith('/'): base_path += '/'
             
-            # If only LOD is used, parent and extent are written
             if exp_lods:
                 if exp_parent:
-                    # If lod0 it makes it lod1, automatically calculates the next one
                     current_lod_num = int(exp_lod.replace("lod", ""))
                     parent_lod = f"lod{current_lod_num + 1}"
                     parent_path = f"{base_path}{parent_lod}/{FORCED_FILENAME}"
-                    
                     mroot.appendChild(mdm.createElement('parent')).appendChild(mdm.createTextNode(parent_path))
                     mroot.appendChild(mdm.createElement('extent')).appendChild(mdm.createTextNode(f"{exp_extent:.6f}"))
-                
                 nodefull_path = f"{base_path}{exp_lod}/{FORCED_FILENAME}"
             else:
-                # If LOD is disabled, parent/extent are completely hidden, only nodefullVisual is written
                 nodefull_path = f"{base_path}lod0/{FORCED_FILENAME}"
                 
             mroot.appendChild(mdm.createElement('nodefullVisual')).appendChild(mdm.createTextNode(nodefull_path))
@@ -539,7 +470,6 @@ class BigWorldModelExporter:
                 bmat = pg.get('bmat')
                 if not bmat or not bmat.use_nodes: continue
                 
-                # Scan images in material
                 for node in bmat.node_tree.nodes:
                     if node.type == 'TEX_IMAGE' and node.image and node.image.name not in processed_images:
                         img = node.image
@@ -548,34 +478,22 @@ class BigWorldModelExporter:
                         original_dds_name = img.name.replace(".png", ".dds")
                         target_rel_path = ""
                         
-                        # Find original path from special properties (from .visual path)
                         for key, val in bmat.items():
                             if key.startswith("bw_tex_") and original_dds_name.lower() in str(val).lower():
                                 target_rel_path = str(val).replace('\\', '/')
                                 break
                                 
-                        # --- FIX 3: SMART FOLDER PATH FINDER ---
-                        # If path is found, create that hierarchy (vehicles/...)
                         if target_rel_path:
-                            # Fix backslashes in the selected export directory (E.g. .../res_mods/2.2.0.2/vehicles/american/...)
                             norm_export = export_dir.replace('\\', '/')
-                            
-                            # If "/vehicles/" is present anywhere in the export path
                             if '/vehicles/' in norm_export:
-                                # Split the path in two from the word "/vehicles/" and take the first part as the main root (E.g. I:/.../res_mods/2.2.0.2)
                                 base_root = norm_export.split('/vehicles/')[0]
                                 final_tex_path = os.path.join(base_root, target_rel_path)
-                                
                             elif norm_export.endswith('/vehicles'):
-                                # Discard the "/vehicles" text at the end
                                 base_root = norm_export[:-9] 
                                 final_tex_path = os.path.join(base_root, target_rel_path)
-                                
                             else:
-                                # If not working in the vehicles folder (e.g. Desktop), extract directly next to it
                                 final_tex_path = os.path.join(export_dir, os.path.basename(target_rel_path))
                         else:
-                            # If custom property is not found, extract directly next to the model
                             final_tex_path = os.path.join(export_dir, img.name)
                         
                         final_tex_path_png = final_tex_path.replace(".dds", ".png").replace(".DDS", ".png")
@@ -588,18 +506,13 @@ class BigWorldModelExporter:
                         old_view_transform = scene.view_settings.view_transform
                         
                         try:
-                            # Switch to RAW mode to prevent channels (Blue and Alpha) from breaking
                             scene.view_settings.view_transform = 'Raw'
-                            
                             temp_img.filepath_raw = final_tex_path_png
                             temp_img.file_format = 'PNG'
                             temp_img.save()
-                            
                             convert_png_to_dds(final_tex_path_png)
-                            
                         except Exception as e:
                             print(f"[Error] Texture could not be saved or converted: {e}")
                         finally:
                             scene.view_settings.view_transform = old_view_transform
-                            # Delete the clone from RAM when done, keep the original image.
                             bpy.data.images.remove(temp_img)
