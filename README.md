@@ -87,7 +87,7 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 3. **Editing Textures:**
 	After importing your model, while in object mode, select the part of the tank whose textures you want to edit, go to Texture Paint in the top menu, and paint directly from the UV map on the left or from the tank on the right. Currently, it supports editing AM, GMM, and ANM maps; this may be improved in the future. All texture formats in the game are now supported, and there shouldn't be any export errors (all texture formats are in the code, but I haven't been able to test them all, so please report any errors you find). The only possible difference will be between the Blender rendering and the in-game visuals, as the purpose of textures can change depending on the shaders used. Currently, I've improved the export of normal tank and lighting shaders (other models appear similar to the game, but their animations and animation textures aren't directly imported for editing, for example, the existing heat map texture that makes Ares' cannon glow red when it fires). As explained below, you can see in the game that the green channel of the GMM provides metallic scratches and the red channel provides roughness (my shader code currently cannot reflect the roughness provided by the red channel in Blender). Any changes you make to the AM file will appear in the game as is.
 	
-	**TEXTURE EDITING**
+	**TEXTURE EDITING** --**VIDEO**--
 	
 	[![3](https://img.youtube.com/vi/EGkzMySP3fg/0.jpg)](https://youtu.be/EGkzMySP3fg)
 	
@@ -103,7 +103,7 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 
 	The GIF below is 7.30 minutes long, so you might want to refresh the site to watch it from the beginning. It's so long because I'm explaining weight painting. In summary, when you paint vertex groups, their names must absolutely include BlendBone. After painting the vertex groups, you need to add the bones to which these vertices will be attached. These bones must have the same name as the vertex groups and must be a child (within/subgroup) of the Scene Root. If you want one bone to move with another, for example: If I were to place another movable model on top of the existing model (double-barreled gun), I would need to assign another bone as a child to 1_BlendBone, which is the bone of the original model. If I did this, the new object on top of the gun would move with the gun.
 	
-	**ADDING BONE TO THE MODEL**
+	**ADDING BONE TO THE MODEL** --**VIDEO**--
 	
 	[![4](https://img.youtube.com/vi/GtIkKuneeGE/0.jpg)](https://youtu.be/GtIkKuneeGE)
 	
@@ -116,13 +116,13 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 	
 	I didn't do a very good job with the bone painting(vertex weight painting) because it was just an example to illustrate; I'm sure you can do it much better than me. In the GIF below, I exported the model to the game using quick export and demonstrated its reaction in-game by moving the bone with a simple script I wrote. As you can see below, I made two mistakes. I didn't set the Tawso parameter to true, so the tank's turret didn't appear initially in the game. This is because when I converted a previously static turret model to a skinned shader, the Tawso parameter needs to be true. This isn't a bug; if you don't change the shader from its original state, you won't encounter this problem. The second issue is that I didn't perform a reverse transform. Because I didn't perform a reverse transform, the model should normally be corrupted during export, but my export code solves this problem. If you rotate only the bone in transitional areas (like the area above the cables in my example), such as the 40%a or 60%b bone connection, you will experience problems.
 	
-	**ROTATIONAL AXIS TEST AND BONE MOVEMENT CODE**
+	**ROTATIONAL AXIS TEST AND BONE MOVEMENT CODE** --**VIDEO**--
 	
 	[![5](https://img.youtube.com/vi/ZZrc6C_isZM/0.jpg)](https://youtu.be/ZZrc6C_isZM)
 
 	The movement in the x-y-z axes in Blender is the same as the movement in the game (without reverse transformations and rotations (rotation wouldn't be a problem if there weren't transition zones; for example, in my case, only the wires of the weapon are damaged, not the body and tips)). If I had done the bone staining correctly (without the transition), the flexibility of the cable during rotations would have been more realistic.
 	
-	 **TESTING WITHOUT ROTATION AXIS**
+	 **TESTING WITHOUT ROTATION AXIS** --**VIDEO**--
    
 	[![6](https://img.youtube.com/vi/VHPU0T6ZnWE/0.jpg)](https://youtu.be/VHPU0T6ZnWE)
 
@@ -130,7 +130,7 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 
 	/---------------------------------------------------------------------------------------
 
-6. **Full Tank Export**
+6. **Full Tank Export** 
 
 
 	![Pasted image 20260703030807](images%20(readme)/Pasted%20image%2020260703030807.png)
@@ -148,7 +148,7 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 7. **Manuel Export and Vertex Colors**
 	Currently, all models that can be imported can be exported except for minor errors during export, but since I haven't fully coded the shaders in Blender yet, you may not get the exact same look as in the game. This is because the node connections of the shaders are very variable; for example, the weapon skin added for Tier 11 tanks (I will give an example of this later) moves on its own due to the wind. My code makes node connections like GMM AM, but the vertex colors in this file affect the movement of the vertices, so a special node structure needs to be created. (The appearance is the same as in the game, but the ripple effect is not yet simulated with shaders in Blender. (I created a special folder for shaders; if you want to help me improve the code, you can write and share code that makes node connections for a specific shader, because there are 170 different shaders for models in the game, but about 30-40 of them have different properties)). I made node connections for the lighting models; don't forget to select the lighting option in manual export, this is a template. You can also edit the vertex colors in the lighting models and change the parameters in the shading section. There's a big visual difference compared to the previous version because I adjusted the light shader, but for now I'm ignoring parameters like double-sided (you can change the parameter, it won't make a difference in Blender but it will in the game).
 	
-	**LIGHT MODELS**
+	**LIGHT MODELS** --**VIDEO**--
 	
 	[![7](https://img.youtube.com/vi/kCu0mZIoNOQ/0.jpg)](https://youtu.be/kCu0mZIoNOQ)
 	
@@ -158,19 +158,19 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 	
 	If the location where you export the file is a tool location within Resmods, the texture and model files will be automatically located and their file paths will be written. However, if you export to a different folder, you will need to change the file path within the .model file, and the texture files will also be exported to the same folder as the model. Therefore, changing a texture can affect other models in the game; you can try renaming it to ensure it only affects your model. You can create very creative mods with scripts; for example, the normal wind-affected area I created on Ares, as well as the sagging fabric areas of a bony model, can be done with the modeling knowledge and complex scripts I've described so far. (I'll explain the wind-affected static model later.)
 	
-	**AN EXAMPLE**
+	**AN EXAMPLE** --**VIDEO**--
 	
 	[![8](https://img.youtube.com/vi/lD4EDpiWikk/0.jpg)](https://youtu.be/lD4EDpiWikk)
 	
 	Now I will explain the models affected by wind, using a gun sleeve as an example. Vertex colors determine which areas will be affected, while animation parameters provide information on how much the wind will cause the waves to ripple. As far as I know, currently only the first two of the four parameters (vector4) are functional.
 	
-	**WIND-SENSITIVE FABRIC**
+	**WIND-SENSITIVE FABRIC** --**VIDEO**--
 	
 	[![9](https://img.youtube.com/vi/xsNcdiITQSg/0.jpg)](https://youtu.be/xsNcdiITQSg)
 
 	Currently, my addon has some features that aren't working correctly, like .seq, .eff, and .vfx files. I'm not planning on improving these further because Blender doesn't seem to be a suitable environment for it (simulating what a shader does with geometry nodes causes extremely low FPS in Blender). I recommend using Unified Editor for improving these things; maybe I can improve the .vfx part more, but I don't know about the others. Another feature I haven't mentioned is using Blender within World of Tanks. I developed this, but it's incomplete because I couldn't transfer the Blender controls (keyboard) from the game to Blender. I mirrored the Blender window to the game using DirectX hooking, but since this project isn't finished, I won't share the DLL code yet, so don't use the WotLiveSandBox button (under the window menu) in Blender. The animation import works as I described, but I haven't added the export option yet.
 	
-	**OTHERS**
+	**OTHERS** --**VIDEO**--
 	
 	[![10](https://img.youtube.com/vi/uqZqjg9y53s/0.jpg)](https://youtu.be/uqZqjg9y53s)
 	
