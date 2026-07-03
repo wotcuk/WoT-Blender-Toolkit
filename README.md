@@ -91,7 +91,7 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 	
 	[![3](https://img.youtube.com/vi/EGkzMySP3fg/0.jpg)](https://youtu.be/EGkzMySP3fg)
 	
-	As you can see in the GIF, you can provide transparency to the model by using the red channel of the ANM file, if it is being used. You can enable the red channel of the ANM files by adding a value node to the "BW BOOL PARAMETERS" parameters, naming it alphaTestEnable, and setting its value to 1.0 (to see the effect, directly link the ANM's red channel to Principled BSDF alpha), or by adding a string parameter named: bw_bool_alphaTestEnable to the custom prop section of the material using that texture and writing true inside it. If there is a parameter representing the custom prop section in the shading part, the shading node will be effective; otherwise, the custom prop section will be effective.
+	As you can see in the Video, you can provide transparency to the model by using the red channel of the ANM file, if it is being used. You can enable the red channel of the ANM files by adding a value node to the "BW BOOL PARAMETERS" parameters, naming it alphaTestEnable, and setting its value to 1.0 (to see the effect, directly link the ANM's red channel to Principled BSDF alpha), or by adding a string parameter named: bw_bool_alphaTestEnable to the custom prop section of the material using that texture and writing true inside it. If there is a parameter representing the custom prop section in the shading part, the shading node will be effective; otherwise, the custom prop section will be effective.
 
 	/---------------------------------------------------------------------------------------
 4. **Editing Bones:**
@@ -105,7 +105,7 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 	
 	**ADDING BONE TO THE MODEL**
 	
-	![4](mp4/4.mp4)
+	[![4](https://img.youtube.com/vi/GtIkKuneeGE/0.jpg)](https://youtu.be/GtIkKuneeGE)
 	
 	
 	
@@ -118,17 +118,19 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 	
 	**ROTATIONAL AXIS TEST AND BONE MOVEMENT CODE**
 	
-	![5](mp4/5.mp4)
+	[![5](https://img.youtube.com/vi/ZZrc6C_isZM/0.jpg)](https://youtu.be/ZZrc6C_isZM)
 
 	The movement in the x-y-z axes in Blender is the same as the movement in the game (without reverse transformations and rotations (rotation wouldn't be a problem if there weren't transition zones; for example, in my case, only the wires of the weapon are damaged, not the body and tips)). If I had done the bone staining correctly (without the transition), the flexibility of the cable during rotations would have been more realistic.
 	
 	 **TESTING WITHOUT ROTATION AXIS**
-	![6](mp4/6.mp4)
+   
+	[![6](https://img.youtube.com/vi/VHPU0T6ZnWE/0.jpg)](https://youtu.be/VHPU0T6ZnWE)
+
 	I haven't yet found a solution for the reverse transform, but I plan to in the future. I'll probably create something like a reverse transformation system for bones called BlendBoneR.
 
 	/---------------------------------------------------------------------------------------
 
-5. **Full Tank Export**
+6. **Full Tank Export**
 
 
 	![Pasted image 20260703030807](images%20(readme)/Pasted%20image%2020260703030807.png)
@@ -143,12 +145,12 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 	Files and textures are automatically exported to the game's res_mods folder. The export path is set according to the location you entered in the bw_export_base_path section (e.g. vehicles/american/A179_Black_Rock/normal/), and the folders are created accordingly.
 
 	/---------------------------------------------------------------------------------------
-6. **Manuel Export and Vertex Colors**
+7. **Manuel Export and Vertex Colors**
 	Currently, all models that can be imported can be exported except for minor errors during export, but since I haven't fully coded the shaders in Blender yet, you may not get the exact same look as in the game. This is because the node connections of the shaders are very variable; for example, the weapon skin added for Tier 11 tanks (I will give an example of this later) moves on its own due to the wind. My code makes node connections like GMM AM, but the vertex colors in this file affect the movement of the vertices, so a special node structure needs to be created. (The appearance is the same as in the game, but the ripple effect is not yet simulated with shaders in Blender. (I created a special folder for shaders; if you want to help me improve the code, you can write and share code that makes node connections for a specific shader, because there are 170 different shaders for models in the game, but about 30-40 of them have different properties)). I made node connections for the lighting models; don't forget to select the lighting option in manual export, this is a template. You can also edit the vertex colors in the lighting models and change the parameters in the shading section. There's a big visual difference compared to the previous version because I adjusted the light shader, but for now I'm ignoring parameters like double-sided (you can change the parameter, it won't make a difference in Blender but it will in the game).
 	
 	**LIGHT MODELS**
 	
-	![7](mp4/7.mp4)
+	[![7](https://img.youtube.com/vi/kCu0mZIoNOQ/0.jpg)](https://youtu.be/kCu0mZIoNOQ)
 	
 	What I mean by "Vertex format" is that it modifies both the .visual file and the contents of the packaged file (primitives_processed). If your model has vertex color, the color data will be written to the .primitives file, even if it's in a standard tank or under simple lighting.
 	
@@ -158,19 +160,19 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 	
 	**AN EXAMPLE**
 	
-	![8](mp4/8.mp4)
+	[![8](https://img.youtube.com/vi/lD4EDpiWikk/0.jpg)](https://youtu.be/lD4EDpiWikk)
 	
 	Now I will explain the models affected by wind, using a gun sleeve as an example. Vertex colors determine which areas will be affected, while animation parameters provide information on how much the wind will cause the waves to ripple. As far as I know, currently only the first two of the four parameters (vector4) are functional.
 	
 	**WIND-SENSITIVE FABRIC**
 	
-	![9](mp4/9.mp4)
+	[![9](https://img.youtube.com/vi/xsNcdiITQSg/0.jpg)](https://youtu.be/xsNcdiITQSg)
 
 	Currently, my addon has some features that aren't working correctly, like .seq, .eff, and .vfx files. I'm not planning on improving these further because Blender doesn't seem to be a suitable environment for it (simulating what a shader does with geometry nodes causes extremely low FPS in Blender). I recommend using Unified Editor for improving these things; maybe I can improve the .vfx part more, but I don't know about the others. Another feature I haven't mentioned is using Blender within World of Tanks. I developed this, but it's incomplete because I couldn't transfer the Blender controls (keyboard) from the game to Blender. I mirrored the Blender window to the game using DirectX hooking, but since this project isn't finished, I won't share the DLL code yet, so don't use the WotLiveSandBox button (under the window menu) in Blender. The animation import works as I described, but I haven't added the export option yet.
 	
 	**OTHERS**
 	
-	![10](mp4/10.mp4)
+	[![10](https://img.youtube.com/vi/uqZqjg9y53s/0.jpg)](https://youtu.be/uqZqjg9y53s)
 	
 Please note that this addon is still under development and still contains bugs. If you report them, I will try to fix them, but most of the bugs stem from attempts to automatically configure .visual settings. If you have any questions, you can reach me on Discord for a faster response. (wot0139)
 
