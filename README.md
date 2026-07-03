@@ -41,6 +41,7 @@ and extract them into the Blender folder (Blender Foundation\Blender 4.3\4.3\scr
 ![601](images%20(readme)/Pasted%20image%2020260402101914.png)
 You can then set your game location and the quick export shortcut from here:
 ![Pasted image 20260628193810](images%20(readme)/Pasted%20image%2020260628193810.png)
+
 If you have Unified Editor, you can use its packager to compile .vfx files (I don't recommend this option because packaging takes too long, so I wrote my own packager code, but it can be tried if my code fails). If you also select the Target .vfxbin file, you need to select the file of the .vfx effect you want to modify live in the game's memory.
 ![Pasted image 20260628194346](images%20(readme)/Pasted%20image%2020260628194346.png)
 /---------------------------------------------------------------------------------------------
@@ -55,7 +56,9 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 
 
 	The gun part changes live depending on its compatibility with the turret part (the location where the model is called within the .xml file is inside the turret), and since tanks usually have only one hull model (you can't create a hull by searching, except for the Steel Hunter), the information in the skin section is now obtained directly from the .xml file instead of searching through packages. The information in the Available loads section is updated according to the folder where the .model files are located.
+
 	![1](Gifs/1.gif)
+
 	After finding your tank, the models are loaded according to the option you choose from the extra settings: Normal model (the one that is not destroyed and is visible in the game) and Crashed (the destroyed tank model). If the model you choose has a skin (some skins have the hull in different locations, so only the turret and chassis may be included), you need to select a skin from the skin list. Based on all the above selections, all available LODs within that package file are presented as options. Since LOD0 is the most detailed model, if you are doing a simple operation, I recommend loading and modifying the LOD0 model and exporting it using quick export. And press the LOAD button.Blender may freeze for a while, but this is normal because import and export processes take time. Instead of showing it at the bottom, I moved it to the top of the cursor. After loading your model, you can switch to material mode to see the texture on the tank. Hold down the Z key and select the option at the bottom.
 
 
@@ -79,6 +82,7 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 
 
 	That's all for the model import process.
+
 	/---------------------------------------------------------------------------------------
 3. **Editing Textures:**
 	After importing your model, while in object mode, select the part of the tank whose textures you want to edit, go to Texture Paint in the top menu, and paint directly from the UV map on the left or from the tank on the right. Currently, it supports editing AM, GMM, and ANM maps; this may be improved in the future. All texture formats in the game are now supported, and there shouldn't be any export errors (all texture formats are in the code, but I haven't been able to test them all, so please report any errors you find). The only possible difference will be between the Blender rendering and the in-game visuals, as the purpose of textures can change depending on the shaders used. Currently, I've improved the export of normal tank and lighting shaders (other models appear similar to the game, but their animations and animation textures aren't directly imported for editing, for example, the existing heat map texture that makes Ares' cannon glow red when it fires). As explained below, you can see in the game that the green channel of the GMM provides metallic scratches and the red channel provides roughness (my shader code currently cannot reflect the roughness provided by the red channel in Blender). Any changes you make to the AM file will appear in the game as is.
@@ -88,6 +92,7 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 	![3](mp4/3.mp4)
 	
 	As you can see in the GIF, you can provide transparency to the model by using the red channel of the ANM file, if it is being used. You can enable the red channel of the ANM files by adding a value node to the "BW BOOL PARAMETERS" parameters, naming it alphaTestEnable, and setting its value to 1.0 (to see the effect, directly link the ANM's red channel to Principled BSDF alpha), or by adding a string parameter named: bw_bool_alphaTestEnable to the custom prop section of the material using that texture and writing true inside it. If there is a parameter representing the custom prop section in the shading part, the shading node will be effective; otherwise, the custom prop section will be effective.
+
 	/---------------------------------------------------------------------------------------
 4. **Editing Bones:**
 	 First of all, in order to work with any model, the model's mesh must be inside an armature, and the node at the highest hierarchy must be named Scene Root. Therefore, it is recommended to import and modify a pre-existing model. An array represents a file (meaning a file can contain multiple meshes). As far as I know, there is currently no mesh limit. If your model becomes invisible after exporting, it is related to the shader you are using and the bw_renderSet_tawso value. Instead of changing it in the .visual file (if you are creating a model from scratch in Blender, you should create this yourself; its name is bw_renderSet_tawso and its type is Boolean), you can directly change it in the custom prop section of the relevant mesh and see its effect in the game (remember, if you don't enter this parameter, the code will use the value from the scan data by default).
@@ -120,6 +125,7 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 	 **TESTING WITHOUT ROTATION AXIS**
 	![6](mp4/6.mp4)
 	I haven't yet found a solution for the reverse transform, but I plan to in the future. I'll probably create something like a reverse transformation system for bones called BlendBoneR.
+
 	/---------------------------------------------------------------------------------------
 
 5. **Full Tank Export**
@@ -135,6 +141,7 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 	![Pasted image 20260703031827](images%20(readme)/Pasted%20image%2020260703031827.png)
 	
 	Files and textures are automatically exported to the game's res_mods folder. The export path is set according to the location you entered in the bw_export_base_path section (e.g. vehicles/american/A179_Black_Rock/normal/), and the folders are created accordingly.
+
 	/---------------------------------------------------------------------------------------
 6. **Manuel Export and Vertex Colors**
 	Currently, all models that can be imported can be exported except for minor errors during export, but since I haven't fully coded the shaders in Blender yet, you may not get the exact same look as in the game. This is because the node connections of the shaders are very variable; for example, the weapon skin added for Tier 11 tanks (I will give an example of this later) moves on its own due to the wind. My code makes node connections like GMM AM, but the vertex colors in this file affect the movement of the vertices, so a special node structure needs to be created. (The appearance is the same as in the game, but the ripple effect is not yet simulated with shaders in Blender. (I created a special folder for shaders; if you want to help me improve the code, you can write and share code that makes node connections for a specific shader, because there are 170 different shaders for models in the game, but about 30-40 of them have different properties)). I made node connections for the lighting models; don't forget to select the lighting option in manual export, this is a template. You can also edit the vertex colors in the lighting models and change the parameters in the shading section. There's a big visual difference compared to the previous version because I adjusted the light shader, but for now I'm ignoring parameters like double-sided (you can change the parameter, it won't make a difference in Blender but it will in the game).
