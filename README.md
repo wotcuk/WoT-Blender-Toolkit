@@ -89,7 +89,7 @@ If you have Unified Editor, you can use its packager to compile .vfx files (I do
 	
 	**TEXTURE EDITING**
 	
-	![3](mp4/3.mp4)
+	[![3](https://img.youtube.com/vi/EGkzMySP3fg/0.jpg)](https://youtu.be/EGkzMySP3fg)
 	
 	As you can see in the GIF, you can provide transparency to the model by using the red channel of the ANM file, if it is being used. You can enable the red channel of the ANM files by adding a value node to the "BW BOOL PARAMETERS" parameters, naming it alphaTestEnable, and setting its value to 1.0 (to see the effect, directly link the ANM's red channel to Principled BSDF alpha), or by adding a string parameter named: bw_bool_alphaTestEnable to the custom prop section of the material using that texture and writing true inside it. If there is a parameter representing the custom prop section in the shading part, the shading node will be effective; otherwise, the custom prop section will be effective.
 
