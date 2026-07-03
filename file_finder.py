@@ -46,6 +46,7 @@ class WoTFileFinder:
     def _search_aligned(self, base_dir, internal_path):
         parts = internal_path.split("/")
         for part in parts:
+            if not part: continue 
             if part in base_dir:
                 root_path = base_dir.split(part)[0]
                 full_path = os.path.join(root_path, internal_path).replace("/", os.sep)

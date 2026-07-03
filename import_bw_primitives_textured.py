@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""SkepticalFox 2015-2024 & Wotcuk - TEXTURED VERSION (V11: VERTEX COLOR ALPHA SUPPORT)"""
+"""SkepticalFox 2015-2024 & Wotcuk (2026)- TEXTURED VERSION (V11: VERTEX COLOR ALPHA SUPPORT)"""
 
 import logging, os, traceback, math, tempfile, shutil, subprocess
 from pathlib import Path
@@ -74,7 +74,6 @@ def create_armature_from_nodes(col, elem, armature_name):
     arm_obj.hide_set(True)
     return arm_obj
 
-# --- TEXTURE PROCESSING ---
 def load_image_safe(path_str, base_path, finder, context, is_data=False):
     clean_path = path_str.replace("\\", "/").strip("/")
     
@@ -88,42 +87,66 @@ def load_image_safe(path_str, base_path, finder, context, is_data=False):
         context['last_pkg'] = finder.last_found_pkg
 
     fname = os.path.basename(fpath)
+    fname_tga = fname.replace(".dds", ".tga").replace(".DDS", ".tga")
     fname_png = fname.replace(".dds", ".png").replace(".DDS", ".png")
     
     try:
-        if fname_png in bpy.data.images:
-            img = bpy.data.images[fname_png]
-            if img.size[0] > 0 and img.size[1] > 0:
-                return img
-            else:
-                bpy.data.images.remove(img) 
+        # Önce Blender'da yüklü mü diye hem TGA hem PNG için kontrol et
+        for existing_fname in [fname_tga, fname_png]:
+            if existing_fname in bpy.data.images:
+                img = bpy.data.images[existing_fname]
+                if img.size[0] > 0 and img.size[1] > 0:
+                    return img
+                else:
+                    bpy.data.images.remove(img) 
 
         temp_dir = tempfile.gettempdir()
-        
         texconv_path = os.path.join(os.path.dirname(__file__), "texconv.exe") 
         
+        img = None
+        
+        # 1. DENEME: Asıl tercih edilen TGA formatı
         try:
             subprocess.run(
-                [texconv_path, "-ft", "png", "-o", temp_dir, "-y", fpath],
+                [texconv_path, "-ft", "tga", "-o", temp_dir, "-y", fpath],
                 check=True,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            
-            temp_png_path = os.path.join(temp_dir, fname_png)
-            
-            img = bpy.data.images.load(temp_png_path)
+            temp_path = os.path.join(temp_dir, fname_tga)
+            img = bpy.data.images.load(temp_path)
             img.pack()
             
             try:
-                os.remove(temp_png_path)
+                os.remove(temp_path)
             except:
                 pass
                 
-        except subprocess.CalledProcessError as sub_err:
-            write_to_blender_text(f"[Error] Texconv failed for {fname}: {sub_err}")
-            return None
+        except subprocess.CalledProcessError as sub_err_tga:
+            write_to_blender_text(f"[Info] TGA conversion failed for {fname}, falling back to PNG...")
             
-        if is_data: img.colorspace_settings.name = 'Non-Color'
+            # 2. DENEME (FALLBACK): TGA çöktüyse gradyan haritaları için PNG dene
+            try:
+                subprocess.run(
+                    [texconv_path, "-ft", "png", "-o", temp_dir, "-y", fpath],
+                    check=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                temp_path = os.path.join(temp_dir, fname_png)
+                img = bpy.data.images.load(temp_path)
+                img.pack()
+                
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+                    
+            except subprocess.CalledProcessError as sub_err_png:
+                write_to_blender_text(f"[Error] Both TGA and PNG conversion failed for {fname}. TGA Error: {sub_err_tga}")
+                return None
+            
+        if img and is_data: 
+            img.colorspace_settings.name = 'Non-Color'
+            
         return img
         
     except Exception as e:
@@ -131,6 +154,80 @@ def load_image_safe(path_str, base_path, finder, context, is_data=False):
         return None
 def process_material_textures(mat, props_xml, base_path, finder, context, has_vertex_color=False, vcol_name="BPVScolour"):
     try:
+        # --- %100 TÜM FORMATLARI İÇEREN Gelişmiş DDS DEDEKTÖRÜ (TARAMA RAPORUNA GÖRE GÜNCELLENDİ) ---
+        import struct
+        def get_dds_format(filepath):
+            if not os.path.exists(filepath): return "BC1_UNORM"
+            try:
+                with open(filepath, 'rb') as f:
+                    if f.read(4) != b'DDS ': return "BC1_UNORM"
+                    
+                    f.seek(80) # PixelFormat.dwFlags konumuna zıpla
+                    pf_flags = struct.unpack('<I', f.read(4))[0]
+                    fourcc = f.read(4) # Offset 84
+                    
+                    # 1. DDPF_FOURCC (0x4) Bayrağı Varsa:
+                    if pf_flags & 0x4:
+                        # Standart 8-Bit / 16-Bit / 32-Bit Metin (String) Sıkıştırmaları
+                        if fourcc == b'DXT1': return "BC1_UNORM"
+                        elif fourcc == b'DXT3': return "BC2_UNORM"
+                        elif fourcc == b'DXT5': return "BC3_UNORM"
+                        elif fourcc in [b'ATI1', b'BC4U']: return "BC4_UNORM"
+                        elif fourcc in [b'ATI2', b'BC5U', b'DXT5' if fourcc==b'ATI2' else b'']: return "BC5_UNORM"
+                        
+                        # Modern DX10 Genişletilmiş Başlık
+                        elif fourcc == b'DX10': 
+                            f.seek(128) # DX10 header başlangıcı
+                            dxgi_format = struct.unpack('<I', f.read(4))[0]
+                            
+                            # Tam Doğru DXGI Format Haritası (SRGB ve UNORM Ayrımı Korunarak):
+                            if dxgi_format in [70, 71]: return "BC1_UNORM"
+                            elif dxgi_format == 72: return "BC1_UNORM_SRGB"
+                            elif dxgi_format in [73, 74]: return "BC2_UNORM"
+                            elif dxgi_format == 75: return "BC2_UNORM_SRGB"
+                            elif dxgi_format in [76, 77]: return "BC3_UNORM"
+                            elif dxgi_format == 78: return "BC3_UNORM_SRGB"
+                            elif dxgi_format in [79, 80]: return "BC4_UNORM"
+                            elif dxgi_format == 81: return "BC4_SNORM"
+                            elif dxgi_format in [82, 83]: return "BC5_UNORM"
+                            elif dxgi_format == 84: return "BC5_SNORM"
+                            elif dxgi_format in [97, 98]: return "BC7_UNORM"
+                            elif dxgi_format == 99: return "BC7_UNORM_SRGB"
+                            elif dxgi_format == 61: return "R8_UNORM"
+                            elif dxgi_format in [27, 28]: return "R8G8B8A8_UNORM"
+                            elif dxgi_format == 29: return "R8G8B8A8_UNORM_SRGB"
+                            elif dxgi_format in [2, 10]: return "R32G32B32A32_FLOAT"
+                            elif dxgi_format in [87, 93]: return "B8G8R8A8_UNORM"
+                            elif dxgi_format == 91: return "B8G8R8A8_UNORM_SRGB"
+                            
+                        # Klasik D3DFORMAT Integer (Sayısal) Kodları
+                        else:
+                            fourcc_int = struct.unpack('<I', fourcc)[0]
+                            if fourcc_int == 116: return "R32G32B32A32_FLOAT"   # 74000000 (Gradients/Ramp)
+                            elif fourcc_int == 113: return "R16G16B16A16_FLOAT" # 71000000 (Küpler / sh_grid)
+                            elif fourcc_int == 114: return "R32_FLOAT"          # 72000000 (inv_table)
+                            elif fourcc_int == 111: return "R16_FLOAT"
+                            elif fourcc_int == 36: return "R16G16B16A16_UNORM" 
+                            elif fourcc_int == 21: return "B8G8R8A8_UNORM"      # A8R8G8B8
+                            
+                    # 2. Sıkıştırılmamış Ham (RGB/RGBA) formatlar (DDPF_RGB vb.) -> 0x40
+                    elif pf_flags & 0x40: 
+                        f.seek(88) # RGB Bit Count
+                        bit_count = struct.unpack('<I', f.read(4))[0]
+                        if bit_count == 32: return "B8G8R8A8_UNORM"    # RAW_UNCOMPRESSED 32-bit
+                        elif bit_count == 24: return "B8G8R8X8_UNORM"  # RAW_UNCOMPRESSED 24-bit
+                        elif bit_count == 8: return "R8_UNORM"         # RAW_UNCOMPRESSED 8-bit
+                        
+                    # 3. Yalnızca Alpha İçeren Formatlar (DDPF_ALPHA) -> 0x2
+                    elif pf_flags & 0x2:
+                        return "A8_UNORM"                              # ALPHA_ONLY 8-bit (Bulut maskeleri)
+                        
+                    # 4. Luminance Formatı (DDPF_LUMINANCE) -> 0x20000
+                    elif pf_flags & 0x20000:
+                        return "R8_UNORM"                              # UNIDENTIFIED (Ateş / Cookie maskeleri)
+
+            except: pass
+            return "BC1_UNORM" # Bulunamazsa güvenli varsayılan değer
         mat.use_nodes = True
         mat.blend_method = 'OPAQUE' 
         if hasattr(mat, "show_transparent_back"):
@@ -164,6 +261,13 @@ def process_material_textures(mat, props_xml, base_path, finder, context, has_ve
                 elif "specular" in name or "pbs" in name or "_gmm.dds" in val_l: tex_files["gmm"] = val
 
             exact_name = (prop.text or "").strip()
+            # Orijinal DDS formatını tara ve materyale mühürle
+            if exact_name and prop.find("Texture") is not None and val:
+                clean_path = val.replace("\\", "/").strip("/")
+                fpath = finder.find(clean_path, str(base_path), clean_path, context_pkg=context.get('last_pkg'))
+                if fpath:
+                    mat[f"bw_dds_format_{exact_name}"] = get_dds_format(fpath)
+
             if exact_name:
                 if prop.find("Vector4") is not None:
                     extra_props[exact_name] = [float(x) for x in prop.find("Vector4").text.split()]
@@ -180,169 +284,216 @@ def process_material_textures(mat, props_xml, base_path, finder, context, has_ve
                         tex_val += ".dds"
                         
                     extra_props[exact_name] = tex_val
-        prop_nodes = {}
-        dump_y = 600
+        # --- BÜTÜN PARAMETRELERİ NODE OLARAK SAHNEYE EKLEME ---
+        # Temiz düzen:
+        #   - Her tür solda ayrı ana frame içinde durur.
+        #   - Frame'ler iç içe DEĞİL; solda alt alta geniş boşlukla dizilir.
+        #   - Vector4 artık Color/RGB node değil:
+        #       g_detailUVTiling.xyz -> Combine XYZ
+        #       g_detailUVTiling.w   -> Value
+        #     İkisi aynı Vector4 frame içinde aynı satırda durur.
+        #   - Shader scriptleri sonraki adımda .xyz/.w node düzenini okuyacak.
+
+        def _new_frame(name, label, loc, color):
+            frame = nodes.new('NodeFrame')
+            frame.name = name
+            frame.label = label
+            frame.location = loc
+            try:
+                frame.use_custom_color = True
+                frame.color = color
+            except Exception:
+                pass
+            return frame
+
+        def _set_node_color(node, color):
+            try:
+                node.use_custom_color = True
+                node.color = color
+            except Exception:
+                pass
+
+        def _put_in_frame(node, frame, rel_loc):
+            # Önce parent ver, sonra relative location ayarla.
+            # Böylece node'lar frame içine düzgün, üst üste binmeden yerleşir.
+            try:
+                node.parent = frame
+            except Exception:
+                pass
+            node.location = rel_loc
+
+        # 1. Parametreleri türlerine göre ayır.
+        bool_props = []
+        tex_props = []
+        vec4_props = []
+        float_props = []
+        int_props = []
+
+        # bool, int'in alt sınıfı olduğu için bool kontrolü önce.
         for p_name, p_val in extra_props.items():
-            if isinstance(p_val, list) and len(p_val) >= 3:
-                if "color" in p_name.lower() or "tint" in p_name.lower():
-                    vn = nodes.new('ShaderNodeRGB')
-                    vn.label = p_name
-                    vn.outputs[0].default_value = (p_val[0], p_val[1], p_val[2], p_val[3] if len(p_val)>3 else 1.0)
-                    out_sock = vn.outputs[0]
-                else:
-                    vn = nodes.new('ShaderNodeCombineXYZ')
-                    vn.label = p_name
-                    vn.inputs['X'].default_value = p_val[0]
-                    vn.inputs['Y'].default_value = p_val[1]
-                    vn.inputs['Z'].default_value = p_val[2]
-                    out_sock = vn.outputs['Vector']
-                
-                vn.location = (-1400, dump_y)
-                prop_nodes[p_name] = {"node": vn, "out": out_sock}
-                dump_y -= 200
-        vcol_color_handle = None
-        vcol_alpha_handle = None
-        
+            if isinstance(p_val, bool):
+                bool_props.append((p_name, p_val))
+            elif isinstance(p_val, str) and p_val.lower().endswith(".dds"):
+                tex_props.append((p_name, p_val))
+            elif isinstance(p_val, list) and len(p_val) >= 4:
+                vec4_props.append((p_name, p_val))
+            elif isinstance(p_val, list) and len(p_val) >= 3:
+                vec4_props.append((p_name, list(p_val) + [0.0]))
+            elif isinstance(p_val, float):
+                float_props.append((p_name, p_val))
+            elif isinstance(p_val, int):
+                int_props.append((p_name, p_val))
+
+        bool_props.sort(key=lambda x: x[0].lower())
+        tex_props.sort(key=lambda x: x[0].lower())
+        vec4_props.sort(key=lambda x: x[0].lower())
+        float_props.sort(key=lambda x: x[0].lower())
+        int_props.sort(key=lambda x: x[0].lower())
+
+        # 2. Soldaki ana frame yerleşimi.
+        # Yüksekliği tahmini hesaplıyoruz ki frame'ler birbirinin üstüne binmesin.
+        left_x = -2600
+        top_y = 1200
+        gap_y = 260
+
+        bool_h = max(260, len(bool_props) * 120 + 160)
+        tex_h = max(360, len(tex_props) * 320 + 180)
+        vec4_h = max(360, len(vec4_props) * 210 + 180)
+        float_h = max(260, len(float_props) * 120 + 160)
+        int_h = max(260, len(int_props) * 120 + 160)
+
+        y_bool = top_y
+        y_tex = y_bool - bool_h - gap_y
+        y_vec4 = y_tex - tex_h - gap_y
+        y_float = y_vec4 - vec4_h - gap_y
+        y_int = y_float - float_h - gap_y
+
+        frame_bool = _new_frame("BW_FRAME_Bools", "BW BOOL PARAMETERS", (left_x, y_bool), (0.18, 0.32, 0.95))
+        frame_tex = _new_frame("BW_FRAME_Textures", "BW TEXTURE PARAMETERS", (left_x, y_tex), (0.55, 0.24, 0.85))
+        frame_vec4 = _new_frame("BW_FRAME_Vector4", "BW VECTOR4 PARAMETERS", (left_x, y_vec4), (0.14, 0.62, 0.36))
+        frame_float = _new_frame("BW_FRAME_Floats", "BW FLOAT PARAMETERS", (left_x, y_float), (0.95, 0.55, 0.18))
+        frame_int = _new_frame("BW_FRAME_Ints", "BW INT PARAMETERS", (left_x, y_int), (0.85, 0.25, 0.20))
+
+        # 3. Bool node'ları: tek kolon, rahat boşluk.
+        rel_y = 0
+        for p_name, p_val in bool_props:
+            vn = nodes.new('ShaderNodeValue')
+            vn.label = p_name
+            vn.name = p_name
+            vn.outputs[0].default_value = 1.0 if p_val else 0.0
+            _set_node_color(vn, (0.18, 0.32, 0.95))
+            _put_in_frame(vn, frame_bool, (40, rel_y))
+            rel_y -= 120
+
+        # 4. Texture node'ları: tek kolon, her texture arasında geniş boşluk.
+        rel_y = 0
+        for p_name, p_val in tex_props:
+            is_data = any(x in p_name.lower() for x in [
+                "normal", "gmm", "pbs", "metallic", "roughness", "gloss",
+                "ao", "mask", "id", "detail", "depth"
+            ])
+            img = load_image_safe(p_val, base_path, finder, context, is_data=is_data)
+            if img:
+                vn = nodes.new('ShaderNodeTexImage')
+                vn.image = img
+                vn.label = p_name
+                vn.name = p_name
+                try:
+                    vn.extension = 'REPEAT'
+                except Exception:
+                    pass
+                _set_node_color(vn, (0.55, 0.24, 0.85))
+                _put_in_frame(vn, frame_tex, (40, rel_y))
+                rel_y -= 320
+
+        # 5. Vector4 node'ları: iç içe frame yok.
+        # Her Vector4 satırında solda .xyz, sağda .w durur.
+        rel_y = 0
+        for p_name, p_val in vec4_props:
+            vals = [0.0, 0.0, 0.0, 0.0]
+            for idx in range(min(4, len(p_val))):
+                try:
+                    vals[idx] = float(p_val[idx])
+                except Exception:
+                    vals[idx] = 0.0
+
+            xyz = nodes.new('ShaderNodeCombineXYZ')
+            xyz.name = f"{p_name}.xyz"
+            xyz.label = f"{p_name}.xyz"
+            xyz.inputs['X'].default_value = vals[0]
+            xyz.inputs['Y'].default_value = vals[1]
+            xyz.inputs['Z'].default_value = vals[2]
+            _set_node_color(xyz, (0.14, 0.62, 0.36))
+            _put_in_frame(xyz, frame_vec4, (40, rel_y))
+
+            wv = nodes.new('ShaderNodeValue')
+            wv.name = f"{p_name}.w"
+            wv.label = f"{p_name}.w"
+            wv.outputs[0].default_value = vals[3]
+            _set_node_color(wv, (0.14, 0.62, 0.36))
+            _put_in_frame(wv, frame_vec4, (340, rel_y))
+
+            # İsim etiketi için ayrı küçük Value node kullanmıyorum; node label zaten yeterli.
+            rel_y -= 210
+
+        # 6. Float node'ları.
+        rel_y = 0
+        for p_name, p_val in float_props:
+            vn = nodes.new('ShaderNodeValue')
+            vn.label = p_name
+            vn.name = p_name
+            vn.outputs[0].default_value = float(p_val)
+            _set_node_color(vn, (0.95, 0.55, 0.18))
+            _put_in_frame(vn, frame_float, (40, rel_y))
+            rel_y -= 120
+
+        # 7. Int node'ları.
+        rel_y = 0
+        for p_name, p_val in int_props:
+            vn = nodes.new('ShaderNodeValue')
+            vn.label = p_name
+            vn.name = p_name
+            vn.outputs[0].default_value = float(int(p_val))
+            _set_node_color(vn, (0.85, 0.25, 0.20))
+            _put_in_frame(vn, frame_int, (40, rel_y))
+            rel_y -= 120
+
+        # 8. Vertex Color ayrı dursun; shader scriptleri bunu doğrudan VertexColor adıyla arıyor.
         if has_vertex_color:
-            vcol_node = nodes.new('ShaderNodeAttribute')
-            vcol_node.attribute_name = vcol_name 
-            vcol_node.location = (-1000, 400)
-            vcol_color_handle = vcol_node.outputs['Color']
-            vcol_alpha_handle = vcol_node.outputs['Alpha']
-        uv_out = None
-        if "diffuseUVSpeedAlphaOffset" in prop_nodes:
-            speed_info = prop_nodes["diffuseUVSpeedAlphaOffset"]
-            uv_node = nodes.new('ShaderNodeTexCoord'); uv_node.location = (-1000, 200)
-            mapping = nodes.new('ShaderNodeMapping'); mapping.location = (-800, 200)
-            links.new(uv_node.outputs['UV'], mapping.inputs['Vector'])
-            
-            links.new(speed_info["out"], mapping.inputs['Location'])
-            uv_out = mapping.outputs['Vector']
+            vcol = nodes.new('ShaderNodeAttribute')
+            vcol.attribute_name = vcol_name
+            vcol.name = "VertexColor"
+            vcol.label = "VertexColor"
+            vcol.location = (left_x, y_int - int_h - gap_y)
+            _set_node_color(vcol, (0.25, 0.55, 1.0))
 
-        final_color = vcol_color_handle
-        final_alpha = vcol_alpha_handle
+        # --- İLGİLİ SHADER SCRIPTINI ÇAĞIR ---
+        fx_name = mat.get("bw_custom_fx", "").lower()
         
-        if "diffuse" in tex_files:
-            img = load_image_safe(tex_files["diffuse"], base_path, finder, context)
-            if img:
-                tnode = nodes.new('ShaderNodeTexImage')
-                tnode.image = img
-                tnode.location = (-600, 0)
-                if uv_out: links.new(uv_out, tnode.inputs['Vector'])
-                
-                if vcol_color_handle:
-                    m_color = nodes.new('ShaderNodeMix')
-                    m_color.data_type = 'RGBA'; m_color.blend_type = 'MULTIPLY'
-                    m_color.inputs[0].default_value = 1.0 
-                    m_color.location = (-300, 150)
-                    links.new(tnode.outputs['Color'], m_color.inputs[6])
-                    links.new(vcol_color_handle, m_color.inputs[7]) 
-                    final_color = m_color.outputs[2]
+        try:
+            from .shaders.shader_registry import SHADER_SCRIPT_MAP
+            matched = False
+            for key, script in SHADER_SCRIPT_MAP.items():
+                if key in fx_name:
+                    script.setup_nodes(mat, nodes, links)
+                    matched = True
+                    break
+            
+            # Eğer kayıtlı bir shader yoksa fallback olarak pbs_tank shaderını bağla
+            if not matched:
+                default_script = SHADER_SCRIPT_MAP.get("pbs_tank")
+                if default_script:
+                    default_script.setup_nodes(mat, nodes, links)
                 else:
-                    final_color = tnode.outputs['Color']
-
-                if vcol_alpha_handle:
-                    m_alpha = nodes.new('ShaderNodeMath')
-                    m_alpha.operation = 'MULTIPLY'; m_alpha.location = (-300, -50)
-                    links.new(tnode.outputs['Alpha'], m_alpha.inputs[0])
-                    links.new(vcol_alpha_handle, m_alpha.inputs[1])
-                    final_alpha = m_alpha.outputs[0]
-                else:
-                    final_alpha = tnode.outputs['Alpha']
-                    
-        if "TintlColor" in prop_nodes and final_color:
-            tint_info = prop_nodes["TintlColor"]
-            m_tint = nodes.new('ShaderNodeMix'); m_tint.data_type = 'RGBA'; m_tint.blend_type = 'MULTIPLY'
-            m_tint.inputs[0].default_value = 1.0
-            m_tint.location = (-100, 150)
-            links.new(final_color, m_tint.inputs[6])
-            links.new(tint_info["out"], m_tint.inputs[7])
-            final_color = m_tint.outputs[2]
-
-        if final_color:
-            links.new(final_color, bsdf.inputs['Base Color'])
-        ramp_map = extra_props.get("rampFreshnelMap")
-        if extra_props.get("alphaFreshnelEnable") is True and ramp_map:
-            f_img = load_image_safe(ramp_map, base_path, finder, context)
-            if f_img:
-                lw = nodes.new('ShaderNodeLayerWeight'); lw.location = (-1000, -300)
-                inv = nodes.new('ShaderNodeMath'); inv.operation = 'SUBTRACT'; inv.inputs[0].default_value = 1.0
-                inv.location = (-800, -300)
-                links.new(lw.outputs['Facing'], inv.inputs[1])
-
-                comb = nodes.new('ShaderNodeCombineXYZ'); comb.location = (-600, -300)
-                links.new(inv.outputs[0], comb.inputs['X'])
-
-                r_node = nodes.new('ShaderNodeTexImage'); r_node.image = f_img; r_node.location = (-400, -300)
-                links.new(comb.outputs['Vector'], r_node.inputs['Vector'])
-
-                m_f = nodes.new('ShaderNodeMath'); m_f.operation = 'MULTIPLY'; m_f.location = (-200, -200)
-                if final_alpha: links.new(final_alpha, m_f.inputs[0])
-                else: m_f.inputs[0].default_value = 1.0
-                links.new(r_node.outputs['Color'], m_f.inputs[1])
-                final_alpha = m_f.outputs[0]
+                    # pbs_tank bile yüklenemezse en son çare olarak sadece diffuse bağla
+                    diff = nodes.get("diffuseMap")
+                    if diff: links.new(diff.outputs['Color'], bsdf.inputs['Base Color'])
                 
-        if "alphaFadeAmountSoft" in prop_nodes and final_alpha:
-            fade_info = prop_nodes["alphaFadeAmountSoft"]
-            sep_fade = nodes.new('ShaderNodeSeparateXYZ')
-            sep_fade.location = (-200, -400)
-            links.new(fade_info["out"], sep_fade.inputs['Vector'])
+        except Exception as shader_err:
+            write_to_blender_text(f"[Shader Registry Error] {fx_name} için hata: {shader_err}")
             
-            m_fade = nodes.new('ShaderNodeMath'); m_fade.operation = 'MULTIPLY'
-            m_fade.location = (0, -200)
-            links.new(final_alpha, m_fade.inputs[0])
-            links.new(sep_fade.outputs['X'], m_fade.inputs[1])
-            final_alpha = m_fade.outputs[0]
-
-        if final_alpha:
-            links.new(final_alpha, bsdf.inputs['Alpha'])
-        if extra_props.get("destBlend") == 2:
-            mat.blend_method = 'BLEND'
-            if hasattr(mat, "show_transparent_back"):
-                mat.show_transparent_back = True 
-        
-        elif extra_props.get("alphaTestEnable") is True:
-            mat.blend_method = 'CLIP'
-            mat.alpha_threshold = 0.5
-            
-        if "lightMultipliers" in prop_nodes and final_color:
-            l_mult_info = prop_nodes["lightMultipliers"]
-            sep_light = nodes.new('ShaderNodeSeparateXYZ')
-            sep_light.location = (-200, 300)
-            links.new(l_mult_info["out"], sep_light.inputs['Vector'])
-            
-            links.new(final_color, bsdf.inputs['Emission Color'])
-            links.new(sep_light.outputs['X'], bsdf.inputs['Emission Strength'])
-
-        # --- GMM VE NORMAL ---
-        if "gmm" in tex_files:
-            img = load_image_safe(tex_files["gmm"], base_path, finder, context, is_data=True)
-            if img:
-                g = nodes.new('ShaderNodeTexImage'); g.image = img
-                g.location = (-900, -600)
-                sep = nodes.new('ShaderNodeSeparateColor'); sep.location = (-600, -600)
-                links.new(g.outputs['Color'], sep.inputs['Color'])
-                links.new(sep.outputs[1], bsdf.inputs['Metallic'])
-                mix = nodes.new('ShaderNodeMix'); mix.data_type = 'RGBA'; mix.blend_type = 'MIX'
-                mix.location = (-300, -600)
-                links.new(sep.outputs[0], mix.inputs[0]); mix.inputs[6].default_value = (0.8, 0.8, 0.8, 1.0)
-                links.new(sep.outputs[2], mix.inputs[7]); links.new(mix.outputs[2], bsdf.inputs['Roughness'])
-
-        if "normal" in tex_files:
-            img = load_image_safe(tex_files["normal"], base_path, finder, context, is_data=True)
-            if img:
-                n = nodes.new('ShaderNodeTexImage'); n.image = img
-                n.location = (-900, -900)
-                sep = nodes.new('ShaderNodeSeparateColor'); sep.location = (-600, -900)
-                links.new(n.outputs['Color'], sep.inputs['Color'])
-                comb = nodes.new('ShaderNodeCombineColor'); comb.location = (-400, -900)
-                links.new(n.outputs['Alpha'], comb.inputs['Red'])
-                links.new(sep.outputs[1], comb.inputs['Green']); comb.inputs['Blue'].default_value = 1.0
-                nm = nodes.new('ShaderNodeNormalMap'); nm.location = (-200, -900)
-                links.new(comb.outputs['Color'], nm.inputs['Color'])
-                links.new(nm.outputs['Normal'], bsdf.inputs['Normal'])
-
-    except Exception as e: write_to_blender_text(f"[Error] Material Node Error: {e}")
+    except Exception as e: 
+        write_to_blender_text(f"[Error] Material Node Error: {e}")
 
 # --- MAIN ---
 def load_bw_primitive_textured(col: bpy.types.Collection, model_filepath: Path, import_empty: bool = False, finder=None, context=None):
@@ -385,6 +536,17 @@ def load_bw_primitive_textured(col: bpy.types.Collection, model_filepath: Path, 
 
         root_empty_ob = None
         for rs in visual.findall("renderSet"):
+            # 1. Shader TAWSO (Skinned) mu istiyor?
+            tawso = rs.find("treatAsWorldSpaceObject")
+            is_tawso = True if (tawso is not None and "true" in tawso.text.lower()) else False
+            
+            # 2. SENİN TESPİTİN: renderSet içinde gerçekten BlendBone veya özel bir kemik (node) var mı?
+            # Eğer model kemiksizse exporter buraya <node> etiketi yazmaz (0 olur).
+            has_bones = len(rs.findall("node")) > 0
+            
+            # 3. Sadece TAWSO ise DEĞİL, aynı zamanda içinde kemik barındırıyorsa gerçekten Skinned'dir!
+            truly_skinned = is_tawso and has_bones
+
             vres = rs.findtext("geometry/vertices").strip()
             mesh_name = os.path.splitext(vres)[0]
             uv2, col_name = "", ""
@@ -392,7 +554,8 @@ def load_bw_primitive_textured(col: bpy.types.Collection, model_filepath: Path, 
                 if "uv2" in s.text: uv2 = s.text.strip()
                 elif "colour" in s.text: col_name = s.text.strip()
 
-            dm = LoadDataMesh(str(p_path), vres, rs.findtext("geometry/primitive").strip(), uv2, col_name)
+            # truly_skinned bilgisini loaddatamesh'e yolluyoruz
+            dm = LoadDataMesh(str(p_path), vres, rs.findtext("geometry/primitive").strip(), uv2, col_name, is_truly_skinned=truly_skinned)
             bmesh = bpy.data.meshes.new(mesh_name); bmesh.vertices.add(len(dm.vertices))
             
             is_skinned = any("skinned" in (pg.findtext("material/fx") or "").lower() for pg in rs.findall("geometry/primitiveGroup"))
@@ -460,7 +623,7 @@ def load_bw_primitive_textured(col: bpy.types.Collection, model_filepath: Path, 
 
             bmesh.validate(); bmesh.update()
             ob = bpy.data.objects.new(mesh_name, bmesh); col.objects.link(ob)
-
+            ob["bw_renderSet_tawso"] = bool(is_tawso)
             if rs.find("treatAsWorldSpaceObject") is not None and "true" in rs.findtext("treatAsWorldSpaceObject").lower():
                 if dm.bones_info:
                     barr = [{"n": n.text.strip(), "g": ob.vertex_groups.new(name=n.text.strip())} for n in rs.findall("node")]

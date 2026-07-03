@@ -29,7 +29,8 @@ class LoadDataMesh:
     packed_groups = None
     __pfile = None
 
-    def __init__(self, filepath, vertices_name="", primitive_name="", uv2_name="", colour_name=""):
+    def __init__(self, filepath, vertices_name="", primitive_name="", uv2_name="", colour_name="", is_truly_skinned=False):
+        self.is_truly_skinned = is_truly_skinned
         self.__pfile = open(filepath, "rb")
         header = unpack("<I", self.__pfile.read(4))[0]
         assert header == 0x42A14E65
@@ -112,7 +113,6 @@ class LoadDataMesh:
         pos = self.__pfile.tell()
 
         SIZE = 0
-
         is_skinned = False
 
         if vertexFormat == "set3/xyznuviiiwwtbpc":
@@ -164,7 +164,8 @@ class LoadDataMesh:
                     (x, z, y, n, u, v, *bone_raw, t, bn) = unpack(UNPACK_FORMAT, self.__pfile.read(SIZE))
                     IIIWW = tuple(bone_raw) 
                 
-                y = -y # Coordinate fix only for skinned models
+                if self.is_truly_skinned:
+                    y = -y
 
             else:
                 if SIZE == 32 and "xyznuvtb" not in vertices_subname:

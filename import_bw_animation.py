@@ -13,8 +13,8 @@ except ImportError:
     WoTFileFinder = None
 def auto_import_model(model_internal_path, anim_base_dir, finder):
     """
-    Finder kullanarak sadece .model dosyasını bulur. 
-    Alt dosyaları (visual/primitives) bulma işini textured importer'a bırakır.
+    Using Finder, it can only find the .model file.
+    It leaves the task of finding subfiles (visual/primitives) to the textured importer.
     """
     if not model_internal_path or not load_bw_primitive_textured or not finder:
         return None

@@ -1,3 +1,4 @@
+#Don't use it, it's very incomplete.
 import bpy
 import os
 import math
