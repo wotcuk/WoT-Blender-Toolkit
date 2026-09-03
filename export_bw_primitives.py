@@ -7,26 +7,48 @@ import bpy
 import math
 from mathutils import Vector, Matrix, Euler
 
+
 def _wot_export_material_identifier(material, fallback):
-    """Return the original WoT material identifier, not Blender's .001 suffix."""
+    """Keep the exact WoT identifier and never leak Blender's .001 suffix."""
     if material is None:
         return fallback
-
     try:
         source_identifier = material.get("wot_source_material_identifier", "")
     except Exception:
         source_identifier = ""
-
     if source_identifier:
         return str(source_identifier)
 
-    # Backward compatibility for older .blend files imported before this fix.
+    # Backward compatibility for old .blend files imported before this fix.
     name = str(material.name)
     base, dot, suffix = name.rpartition(".")
     if dot and len(suffix) == 3 and suffix.isdigit():
         return base
     return name
 
+
+def _save_image_for_dds(img, filepath, file_format):
+    """Save Image pixels without Scene/Render color-management transforms."""
+    old_format = getattr(img, "file_format", None)
+    old_filepath_raw = getattr(img, "filepath_raw", None)
+    try:
+        img.file_format = file_format
+        try:
+            img.save(filepath=filepath, save_copy=True)
+        except TypeError:
+            img.filepath_raw = filepath
+            img.save()
+    finally:
+        try:
+            if old_format is not None:
+                img.file_format = old_format
+        except Exception:
+            pass
+        try:
+            if old_filepath_raw is not None:
+                img.filepath_raw = old_filepath_raw
+        except Exception:
+            pass
 VERTEX_SHADER_MAP = {
     "set3/xyznuviiiwwpc": [
         "shaders/std_effects/lightonly_skinned.fx",
@@ -1162,27 +1184,16 @@ class BigWorldModelExporter:
                             final_tex_path_temp = final_tex_path.replace(".dds", temp_ext).replace(".DDS", temp_ext)
                             os.makedirs(os.path.dirname(final_tex_path_temp), exist_ok=True)
                             
-                            scene = bpy.context.scene
-                            old_format = scene.render.image_settings.file_format
-                            old_color_mode = scene.render.image_settings.color_mode
-                            old_view_transform = scene.view_settings.view_transform
-                            
                             try:
-                                scene.render.image_settings.file_format = blender_format
-                                scene.render.image_settings.color_mode = 'RGBA'
-                                scene.view_settings.view_transform = 'Raw'
-                                
-                                img.save_render(filepath=final_tex_path_temp, scene=scene)
-                                
+                                # Never use save_render() for WoT textures here: it uses
+                                # Scene Color Management and can gamma-shift the pixel data.
+                                _save_image_for_dds(img, final_tex_path_temp, blender_format)
+
                                 forced_format = bmat.get(f"bw_dds_format_{prop_exact_name}", "")
                                 if not forced_format:
                                     if "_anm" in final_tex_path_temp.lower(): forced_format = "BC7_UNORM"
                                     else: forced_format = "BC1_UNORM"
-                                    
+
                                 convert_to_dds(final_tex_path_temp, forced_format)
                             except Exception as outer_e:
                                 print(f"[Error] Failed to process texture {img.name}: {outer_e}")
-                            finally:
-                                scene.render.image_settings.file_format = old_format
-                                scene.render.image_settings.color_mode = old_color_mode
-                                scene.view_settings.view_transform = old_view_transform
