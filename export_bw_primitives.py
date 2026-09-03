@@ -6,6 +6,27 @@ from .exportdatamesh import ExportDataMesh
 import bpy
 import math
 from mathutils import Vector, Matrix, Euler
+
+def _wot_export_material_identifier(material, fallback):
+    """Return the original WoT material identifier, not Blender's .001 suffix."""
+    if material is None:
+        return fallback
+
+    try:
+        source_identifier = material.get("wot_source_material_identifier", "")
+    except Exception:
+        source_identifier = ""
+
+    if source_identifier:
+        return str(source_identifier)
+
+    # Backward compatibility for older .blend files imported before this fix.
+    name = str(material.name)
+    base, dot, suffix = name.rpartition(".")
+    if dot and len(suffix) == 3 and suffix.isdigit():
+        return base
+    return name
+
 VERTEX_SHADER_MAP = {
     "set3/xyznuviiiwwpc": [
         "shaders/std_effects/lightonly_skinned.fx",
@@ -813,7 +834,7 @@ class BigWorldModelExporter:
             
             for mat_idx in sorted(tris_by_mat.keys()):
                 bmat = mesh.materials[mat_idx] if mat_idx < len(mesh.materials) else None
-                mat_name = bmat.name if bmat else f"mat_{mat_idx}"
+                mat_name = _wot_export_material_identifier(bmat, f"mat_{mat_idx}")
                 
                 group_fx_path = primary_fx_path
                 if not export_info.get("use_manual_shader", False):
