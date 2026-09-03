@@ -501,6 +501,10 @@ def load_bw_primitive_textured(col: bpy.types.Collection, model_filepath: Path, 
     
     if finder is None: finder = WoTFileFinder()
     if context is None: context = {'last_pkg': None}
+
+    # Share materials only inside this single model import. Never reuse a
+    # material datablock from a previously imported tank.
+    material_cache = {}
     
     try:
         model_xml = smart_xml_read(model_filepath)
@@ -597,7 +601,13 @@ def load_bw_primitive_textured(col: bpy.types.Collection, model_filepath: Path, 
             for i, pg in enumerate(dm.PrimitiveGroups):
                 pgv = next((v for v in rs.findall("geometry/primitiveGroup") if int(v.text) == i), None)
                 mn = pgv.findtext("material/identifier").strip() if pgv is not None else f"mat_{i}"
-                material = bpy.data.materials.get(mn) or bpy.data.materials.new(mn)
+                material = material_cache.get(mn)
+                if material is None:
+                    # Always create a fresh datablock for this tank. Blender may
+                    # display .001/.002, but export keeps the original WoT ID.
+                    material = bpy.data.materials.new(mn)
+                    material["wot_source_material_identifier"] = mn
+                    material_cache[mn] = material
                 bmesh.materials.append(material)
                 
                 if pgv is not None:
